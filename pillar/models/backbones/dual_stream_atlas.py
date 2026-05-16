@@ -116,8 +116,6 @@ def _patch_posemb_modules(root: nn.Module) -> None:
         def forward_with_interp(self, x: torch.Tensor, grid_size=(8, 8, 5), modality="chest_ct") -> torch.Tensor:
             target_tokens = x.shape[1]
             expected_tokens = math.prod(grid_size)
-            if target_tokens == expected_tokens:
-                return original_forward(x, grid_size=grid_size, modality=modality)
 
             # Let the original module generate/cache its canonical positional
             # table for this grid size, then resize that table to the incoming
