@@ -5,7 +5,7 @@
 
 experiment:
   name: dual-stream-pillar-ct
-  tags: ["pillar0", "chest", "ct", "phase1"]
+  tags: ["pillar0", "chest", "ct"]
   notes: "CT-only encoder fine-tune on ViMED chest weak labels. Phase 1 of the dual-stream plan."
 
 main:
@@ -17,7 +17,7 @@ main:
 
   disable_wandb: False
   wandb_offline: False
-  wandb_project: muonHC
+  wandb_project: dual-stream-pillar
   wandb_entity: thainamhoang
 
   ckpt_freq: 1
