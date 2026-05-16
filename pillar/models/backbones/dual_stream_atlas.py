@@ -209,10 +209,15 @@ class PillarInitializedAtlasEncoder(nn.Module):
             raise ValueError(f"Expected input shape (B,C,D,H,W) or (C,D,H,W), got {tuple(x.shape)}")
 
         modality_cfg = self.backbone.visual.model_config["modalities"][self.config.anatomy]
-        # Atlas config/layout code expects image_size in (H, W, D) order,
-        # while tensors arrive as (B, C, D, H, W).
+        # The Atlas backbone expects input axes (B, C, H, W, D) so that
+        # patch_size = [pH, pW, pD] aligns with PyTorch Conv3d kernel order.
+        # Pillar's data convention is (B, C, D, H, W), so we permute here.
+        # For cubic inputs this is a no-op; for non-cubic (e.g. 64x256x256)
+        # it is required to keep _build_multiscale_tokens and
+        # prepare_multiscale_layout consistent.
         d, h, w = x.shape[-3:]
         modality_cfg["image_size"] = [h, w, d]
+        x = x.permute(0, 1, 3, 4, 2).contiguous()
         batch = {"anatomy": [self.config.anatomy] * x.shape[0]}
         return self.backbone(x, batch=batch)
 
