@@ -5,15 +5,31 @@ import torch
 from lifelines.utils.btree import _BTree
 from pillar.utils.logging import logger
 import torch.nn.functional as F
-from torchmetrics.functional import (
-    auroc,
-    precision_recall_curve,
-    auc,
-    average_precision,
-)
+from torchmetrics.functional import auroc, precision_recall_curve, average_precision
 
 from pillar.metrics.abstract import AbstractMetric
 from pillar.datasets.nlst import CENSORING_DIST
+
+try:
+    from torchmetrics.functional import auc as tm_auc
+except ImportError:
+    tm_auc = None
+
+
+def _auc(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Compatibility wrapper for torchmetrics.functional.auc.
+
+    Newer torchmetrics releases removed `auc` from the public functional API.
+    For our use here we only need trapezoidal integration of the precision-
+    recall curve, so `torch.trapz` is a faithful fallback.
+    """
+    x = x.float()
+    y = y.float()
+    if tm_auc is not None:
+        return tm_auc(x, y)
+    if x.numel() < 2 or y.numel() < 2:
+        return torch.tensor(-1.0, device=x.device)
+    return torch.trapz(y, x)
 
 
 class SurvivalMetric(AbstractMetric):
@@ -114,7 +130,7 @@ def compute_auc_at_followup(probs, censor_times, golds, followup, fup_lower_boun
 
         ap_score = average_precision(probs_for_eval, golds_for_eval, pos_label=1)
         precision, recall, _ = precision_recall_curve(probs_for_eval, golds_for_eval, pos_label=1)
-        pr_auc = auc(recall, precision)
+        pr_auc = _auc(recall, precision)
     except Exception as e:
         warnings.warn("Failed to calculate AUC because {}".format(e))
         roc_auc = -1.0
