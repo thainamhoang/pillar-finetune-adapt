@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from types import MethodType
 from typing import Optional
 
@@ -103,52 +104,36 @@ def _resize_posemb_sequence(pe: torch.Tensor, target_tokens: int) -> torch.Tenso
     return pe.squeeze(0) if squeeze_batch else pe
 
 
-def _select_posemb_entry(posemb_container, modality):
-    """Handle either dict-like or index-like remote posemb containers."""
-    if hasattr(posemb_container, "keys"):
-        return posemb_container[modality]
-    try:
-        return posemb_container[modality]
-    except Exception:
-        if len(posemb_container) == 1:
-            return posemb_container[0]
-        if isinstance(modality, int):
-            return posemb_container[modality]
-        # For the chest checkpoint we are using a single modality path in
-        # practice, so index 0 is the safest fallback.
-        return posemb_container[0]
-
-
-def _apply_posemb(x, pe: torch.Tensor):
-    if torch.is_tensor(x):
-        resized = _resize_posemb_sequence(pe, x.shape[1])
-        return x + resized
-    if isinstance(x, list):
-        return [_apply_posemb(item, pe) for item in x]
-    if isinstance(x, tuple):
-        return tuple(_apply_posemb(item, pe) for item in x)
-    raise TypeError(f"Unsupported posemb input type: {type(x)}")
-
-
 def _patch_posemb_modules(root: nn.Module) -> None:
     for module in root.modules():
         posemb = getattr(module, "posemb", None)
         if posemb is None or getattr(module, "_vimed_posemb_patched", False):
             continue
+        if module.__class__.__name__ != "RelativePosEmb":
+            continue
         original_forward = module.forward
 
-        # Remote Atlas positional embedding modules are called as module(x, modality).
-        # We keep that API and only interpolate when token count changes.
-        def forward_with_interp(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-            modality = kwargs.get("modality")
-            if modality is None and args:
-                modality = args[0]
-            if modality is None:
-                raise ValueError("Patched posemb forward expected a modality argument")
-            pe = _select_posemb_entry(self.posemb, modality)
-            if not isinstance(pe, torch.Tensor):
-                return original_forward(x, *args, **kwargs)
-            return _apply_posemb(x, pe)
+        def forward_with_interp(self, x: torch.Tensor, grid_size=(8, 8, 5), modality="chest_ct") -> torch.Tensor:
+            target_tokens = x.shape[1]
+            expected_tokens = math.prod(grid_size)
+            if target_tokens == expected_tokens:
+                return original_forward(x, grid_size=grid_size, modality=modality)
+
+            # Let the original module generate/cache its canonical positional
+            # table for this grid size, then resize that table to the incoming
+            # token length. This keeps the pretrained relative-position logic
+            # while allowing D=64 chest inputs.
+            dummy = torch.zeros(
+                x.shape[0],
+                expected_tokens,
+                x.shape[2],
+                device=x.device,
+                dtype=x.dtype,
+            )
+            canonical = original_forward(dummy, grid_size=grid_size, modality=modality)
+            pe = canonical - dummy
+            pe = _resize_posemb_sequence(pe, target_tokens)
+            return x + pe
 
         module.forward = MethodType(forward_with_interp, module)
         module._vimed_posemb_patched = True
