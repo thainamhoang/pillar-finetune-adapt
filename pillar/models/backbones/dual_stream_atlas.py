@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MethodType
 from typing import Optional
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from pillar.models.backbones.mmatlas import MultimodalAtlas
 
@@ -82,6 +84,42 @@ def _adapt_first_conv3d(
     return name
 
 
+def _resize_posemb_sequence(pe: torch.Tensor, target_tokens: int) -> torch.Tensor:
+    squeeze_batch = False
+    if pe.ndim == 2:
+        pe = pe.unsqueeze(0)
+        squeeze_batch = True
+    if pe.ndim != 3:
+        return pe
+    if pe.shape[1] == target_tokens:
+        return pe.squeeze(0) if squeeze_batch else pe
+
+    pe = F.interpolate(
+        pe.transpose(1, 2),
+        size=target_tokens,
+        mode="linear",
+        align_corners=False,
+    ).transpose(1, 2)
+    return pe.squeeze(0) if squeeze_batch else pe
+
+
+def _patch_posemb_modules(root: nn.Module) -> None:
+    for module in root.modules():
+        posemb = getattr(module, "posemb", None)
+        if posemb is None or getattr(module, "_vimed_posemb_patched", False):
+            continue
+
+        # Remote Atlas positional embedding modules are called as module(x, modality).
+        # We keep that API and only interpolate when token count changes.
+        def forward_with_interp(self, x: torch.Tensor, modality: str) -> torch.Tensor:
+            pe = self.posemb[modality]
+            pe = _resize_posemb_sequence(pe, x.shape[1])
+            return x + pe
+
+        module.forward = MethodType(forward_with_interp, module)
+        module._vimed_posemb_patched = True
+
+
 class PillarInitializedAtlasEncoder(nn.Module):
     """Atlas encoder with Pillar-initialized body and reinitialized input layer.
 
@@ -105,6 +143,7 @@ class PillarInitializedAtlasEncoder(nn.Module):
             target_in_channels=config.input_channels,
             init=config.patch_embed_init,
         )
+        _patch_posemb_modules(self.backbone.visual)
         self.input_adapter_name = replaced_name
         self.hidden_dim = self.backbone.hidden_dim
 
@@ -114,6 +153,8 @@ class PillarInitializedAtlasEncoder(nn.Module):
         if x.ndim != 5:
             raise ValueError(f"Expected input shape (B,C,D,H,W) or (C,D,H,W), got {tuple(x.shape)}")
 
+        modality_cfg = self.backbone.visual.model_config["modalities"][self.config.anatomy]
+        modality_cfg["image_size"] = list(x.shape[-3:])
         batch = {"anatomy": [self.config.anatomy] * x.shape[0]}
         return self.backbone(x, batch=batch)
 
