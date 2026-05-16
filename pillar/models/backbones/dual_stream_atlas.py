@@ -135,6 +135,7 @@ def _patch_posemb_modules(root: nn.Module) -> None:
         posemb = getattr(module, "posemb", None)
         if posemb is None or getattr(module, "_vimed_posemb_patched", False):
             continue
+        original_forward = module.forward
 
         # Remote Atlas positional embedding modules are called as module(x, modality).
         # We keep that API and only interpolate when token count changes.
@@ -145,6 +146,8 @@ def _patch_posemb_modules(root: nn.Module) -> None:
             if modality is None:
                 raise ValueError("Patched posemb forward expected a modality argument")
             pe = _select_posemb_entry(self.posemb, modality)
+            if not isinstance(pe, torch.Tensor):
+                return original_forward(x, *args, **kwargs)
             return _apply_posemb(x, pe)
 
         module.forward = MethodType(forward_with_interp, module)
