@@ -294,6 +294,18 @@ class MultimodalAtlas(nn.Module):
         modality, image = batch["anatomy"][0], x
         bsz = image.shape[0]
         logger.debug(f"Entering MultiModalAtlas forward with modality: {modality}, batch size: {bsz}")
+
+        # Atlas stores image_size / patch_size in [H, W, D] order. PyTorch
+        # Conv3d patch_embed expects (B, C, D, H, W) and applies kernel[2]
+        # to the LAST axis. To make these consistent for non-cubic inputs,
+        # permute pillar's (B, C, D, H, W) tensor convention to (B, C, H, W, D)
+        # and update the dynamic image_size to match. For cubic inputs this is
+        # a no-op.
+        if x.ndim == 5:
+            d, h, w = x.shape[-3:]
+            visual.model_config["modalities"][modality]["image_size"] = [h, w, d]
+            x = x.permute(0, 1, 3, 4, 2).contiguous()
+
         x, grid_sizes = visual.build_scales({modality: x}, batch)
 
         modal_config = visual.model_config["modalities"][modality]
