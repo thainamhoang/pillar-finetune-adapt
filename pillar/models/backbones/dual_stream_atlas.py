@@ -104,6 +104,53 @@ def _resize_posemb_sequence(pe: torch.Tensor, target_tokens: int) -> torch.Tenso
     return pe.squeeze(0) if squeeze_batch else pe
 
 
+def _build_relative_posemb(module: nn.Module, x: torch.Tensor, grid_size, modality: str) -> torch.Tensor:
+    """Recreate RelativePosEmb generation without assuming token-length match."""
+    if module.training:
+        module.modality_grid_exists = {}
+        module.posemb = {}
+
+    if modality not in module.modality_grid_exists:
+        module.modality_grid_exists[modality] = True
+        h, w, d = grid_size
+
+        relative_coords_h = torch.arange(0, h, device=x.device, dtype=x.dtype)
+        relative_coords_w = torch.arange(0, w, device=x.device, dtype=x.dtype)
+        relative_coords_d = torch.arange(0, d, device=x.device, dtype=x.dtype)
+
+        relative_coords_table = (
+            torch.stack(
+                torch.meshgrid(
+                    [relative_coords_h, relative_coords_w, relative_coords_d],
+                    indexing="ij",
+                )
+            )
+            .contiguous()
+            .unsqueeze(0)
+        )
+
+        if h > 1:
+            relative_coords_table[0, 0] -= h // 2
+            relative_coords_table[0, 0] /= h // 2
+        if w > 1:
+            relative_coords_table[0, 1] -= w // 2
+            relative_coords_table[0, 1] /= w // 2
+        if d > 1:
+            relative_coords_table[0, 2] -= d // 2
+            relative_coords_table[0, 2] /= d // 2
+
+        relative_coords_table = relative_coords_table.float()
+        if not module.conv:
+            posemb = module.cpb_mlp(
+                relative_coords_table.permute(0, 2, 3, 4, 1).reshape(-1, h * w * d, 3)
+            )
+        else:
+            posemb = module.cpb_mlp(relative_coords_table.squeeze(0).reshape(3, -1))
+        module.posemb[modality] = posemb
+
+    return module.posemb[modality]
+
+
 def _patch_posemb_modules(root: nn.Module) -> None:
     for module in root.modules():
         posemb = getattr(module, "posemb", None)
@@ -115,22 +162,13 @@ def _patch_posemb_modules(root: nn.Module) -> None:
 
         def forward_with_interp(self, x: torch.Tensor, grid_size=(8, 8, 5), modality="chest_ct") -> torch.Tensor:
             target_tokens = x.shape[1]
-            expected_tokens = math.prod(grid_size)
-
-            # Let the original module generate/cache its canonical positional
-            # table for this grid size, then resize that table to the incoming
-            # token length. This keeps the pretrained relative-position logic
-            # while allowing D=64 chest inputs.
-            dummy = torch.zeros(
-                x.shape[0],
-                expected_tokens,
-                x.shape[2],
-                device=x.device,
-                dtype=x.dtype,
-            )
-            canonical = original_forward(dummy, grid_size=grid_size, modality=modality)
-            pe = canonical - dummy
-            pe = _resize_posemb_sequence(pe, target_tokens)
+            pe = _build_relative_posemb(self, x, grid_size, modality)
+            pe_tokens = pe.shape[1]
+            if pe_tokens != target_tokens:
+                if target_tokens % pe_tokens == 0:
+                    pe = pe.repeat(1, target_tokens // pe_tokens, 1)
+                else:
+                    pe = _resize_posemb_sequence(pe, target_tokens)
             return x + pe
 
         module.forward = MethodType(forward_with_interp, module)
