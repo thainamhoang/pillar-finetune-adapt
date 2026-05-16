@@ -119,6 +119,17 @@ def _select_posemb_entry(posemb_container, modality):
         return posemb_container[0]
 
 
+def _apply_posemb(x, pe: torch.Tensor):
+    if torch.is_tensor(x):
+        resized = _resize_posemb_sequence(pe, x.shape[1])
+        return x + resized
+    if isinstance(x, list):
+        return [_apply_posemb(item, pe) for item in x]
+    if isinstance(x, tuple):
+        return tuple(_apply_posemb(item, pe) for item in x)
+    raise TypeError(f"Unsupported posemb input type: {type(x)}")
+
+
 def _patch_posemb_modules(root: nn.Module) -> None:
     for module in root.modules():
         posemb = getattr(module, "posemb", None)
@@ -134,8 +145,7 @@ def _patch_posemb_modules(root: nn.Module) -> None:
             if modality is None:
                 raise ValueError("Patched posemb forward expected a modality argument")
             pe = _select_posemb_entry(self.posemb, modality)
-            pe = _resize_posemb_sequence(pe, x.shape[1])
-            return x + pe
+            return _apply_posemb(x, pe)
 
         module.forward = MethodType(forward_with_interp, module)
         module._vimed_posemb_patched = True
