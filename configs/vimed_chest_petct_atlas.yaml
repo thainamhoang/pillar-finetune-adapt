@@ -1,0 +1,149 @@
+experiment:
+  name: ViMED_Chest_PETCT_Atlas_v2
+  tags: ["vimed", "petct", "atlas", "chest", "multilabel", "v2"]
+  notes: "Fine-tuning Pillar0-ChestCT on ViMED chest PET/CT weak labels with reduced overfitting pressure."
+
+main:
+  exp_name: ViMED_Chest_PETCT_Atlas_v2
+  seed: 42
+  log_dir: ./logs
+  checkpoints_dir: ./logs/vimed
+  timestamp_save_dir: False
+
+  disable_wandb: False
+  wandb_offline: False
+  wandb_project: null
+  wandb_entity: null
+
+  ckpt_freq: 1
+  monitor: val/macro_auroc
+
+  allow_overwriting_experiment_checkpoints: True
+  find_unused_parameters: True
+  force_loading_train_dataloader: False
+
+  phases:
+    train: True
+    dev: True
+    test: True
+
+engine:
+  type: Classifier
+  max_epochs: 8
+  kwargs:
+    resume: null
+    accumulate_grad_batches: 1
+    precision: bf16-mixed
+    binary_pred: True
+    log_loss_components: True
+    log_interval: 25
+    limit_num_batches: null
+    use_gpu_augs: False
+    train_gpu_augs: []
+    test_gpu_augs: []
+
+dataloader:
+  batch_size: 1
+  eval_batch_size: 1
+  num_workers: 4
+  class_bal: False
+  train_drop_last: False
+  val_drop_last: False
+  multi_gpu_eval: False
+  persistent_workers: False
+  prefetch_factor: null
+  clip_grad: null
+  no_shuffle_training_set: False
+  use_null_collate: False
+  frac_train_samples: 1.0
+  no_cache_misses_allowed: False
+
+dataset:
+  type: ViMedPETCTDataset
+  modality: PETCT
+  num_classes: 8
+
+  shared_dataset_kwargs:
+    csv_path: /scratch/thahoa/PET/ViMed_prep/manifest_splits.csv
+    anatomy: "chest_ct"
+    region: "chest"
+    windows: "all"
+    label_columns:
+      - abnormal_fdg_uptake
+      - lymph_node
+      - mass_or_nodule
+      - metastasis_or_recurrence
+      - inflammation_or_hyperplasia
+      - suv_mentioned
+      - effusion_or_fluid
+      - no_abnormal_fdg
+
+model:
+  type: MultiStage
+  kwargs:
+    pool_name: MultiAttentionPool
+    pool_kwargs:
+      hidden_dim: 1152
+
+    backbone_model_type: MultimodalAtlas
+    backbone_kwargs:
+      pretrained: True
+      model_repo_id: YalaLab/Pillar0-ChestCT
+      model_revision: main
+      input_channels: 12
+      extra_channel_init: zero
+
+    head_models:
+      classification:
+        type: Linear
+        kwargs:
+          input_dim: 1152
+          output_dim: 8
+          dropout_rate: 0.2
+        apply_pooling: True
+        use_pooled_features: False
+        enable_at_eval: True
+
+optimizer:
+  type: AdamW
+  kwargs:
+    lr: 5.0e-6
+    weight_decay: 0.03
+
+  scheduler:
+    interval: epoch
+    frequency: 1
+    type: CosineAnnealingWarmup
+    kwargs:
+      min_lr: 1.0e-6
+      warmup_epochs: 2
+      max_epochs: 8
+
+  layer_decay: 0.9
+
+metrics:
+  epoch_metrics:
+    train: &base_metrics
+      - type: MultilabelMetric
+        kwargs:
+          logit_key: classification
+          target_key: y
+          threshold: 0.5
+          label_names:
+            - abnormal_fdg_uptake
+            - lymph_node
+            - mass_or_nodule
+            - metastasis_or_recurrence
+            - inflammation_or_hyperplasia
+            - suv_mentioned
+            - effusion_or_fluid
+            - no_abnormal_fdg
+    val: *base_metrics
+    test: *base_metrics
+
+  losses:
+    - type: MultilabelBCELoss
+      weight: 1.0
+      kwargs:
+        logit_key: classification
+        target_key: y
