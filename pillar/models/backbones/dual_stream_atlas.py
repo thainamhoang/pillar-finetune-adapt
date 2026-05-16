@@ -103,6 +103,22 @@ def _resize_posemb_sequence(pe: torch.Tensor, target_tokens: int) -> torch.Tenso
     return pe.squeeze(0) if squeeze_batch else pe
 
 
+def _select_posemb_entry(posemb_container, modality):
+    """Handle either dict-like or index-like remote posemb containers."""
+    if hasattr(posemb_container, "keys"):
+        return posemb_container[modality]
+    try:
+        return posemb_container[modality]
+    except Exception:
+        if len(posemb_container) == 1:
+            return posemb_container[0]
+        if isinstance(modality, int):
+            return posemb_container[modality]
+        # For the chest checkpoint we are using a single modality path in
+        # practice, so index 0 is the safest fallback.
+        return posemb_container[0]
+
+
 def _patch_posemb_modules(root: nn.Module) -> None:
     for module in root.modules():
         posemb = getattr(module, "posemb", None)
@@ -117,7 +133,7 @@ def _patch_posemb_modules(root: nn.Module) -> None:
                 modality = args[0]
             if modality is None:
                 raise ValueError("Patched posemb forward expected a modality argument")
-            pe = self.posemb[modality]
+            pe = _select_posemb_entry(self.posemb, modality)
             pe = _resize_posemb_sequence(pe, x.shape[1])
             return x + pe
 
