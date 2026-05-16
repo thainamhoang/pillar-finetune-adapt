@@ -209,7 +209,10 @@ class PillarInitializedAtlasEncoder(nn.Module):
             raise ValueError(f"Expected input shape (B,C,D,H,W) or (C,D,H,W), got {tuple(x.shape)}")
 
         modality_cfg = self.backbone.visual.model_config["modalities"][self.config.anatomy]
-        modality_cfg["image_size"] = list(x.shape[-3:])
+        # Atlas config/layout code expects image_size in (H, W, D) order,
+        # while tensors arrive as (B, C, D, H, W).
+        d, h, w = x.shape[-3:]
+        modality_cfg["image_size"] = [h, w, d]
         batch = {"anatomy": [self.config.anatomy] * x.shape[0]}
         return self.backbone(x, batch=batch)
 
