@@ -111,7 +111,12 @@ def _patch_posemb_modules(root: nn.Module) -> None:
 
         # Remote Atlas positional embedding modules are called as module(x, modality).
         # We keep that API and only interpolate when token count changes.
-        def forward_with_interp(self, x: torch.Tensor, modality: str) -> torch.Tensor:
+        def forward_with_interp(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+            modality = kwargs.get("modality")
+            if modality is None and args:
+                modality = args[0]
+            if modality is None:
+                raise ValueError("Patched posemb forward expected a modality argument")
             pe = self.posemb[modality]
             pe = _resize_posemb_sequence(pe, x.shape[1])
             return x + pe
