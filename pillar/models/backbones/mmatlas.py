@@ -162,9 +162,9 @@ class MultimodalAtlas(nn.Module):
         self.model.to(self.device)
 
         if self.input_channels is not None:
-            replaced = self._maybe_expand_first_conv3d(self.input_channels)
+            replaced = self._maybe_adapt_first_conv3d(self.input_channels)
             if replaced is not None:
-                logger.info(f"Expanded first Conv3d patch embed for {self.input_channels} input channels at {replaced}")
+                logger.info(f"Adapted first Conv3d patch embed for {self.input_channels} input channels at {replaced}")
             else:
                 logger.warning(f"Requested input_channels={self.input_channels}, but no matching Conv3d was found")
 
@@ -180,11 +180,20 @@ class MultimodalAtlas(nn.Module):
 
         logger.info(f"Model loaded successfully on device: {self.device}")
 
-    def _maybe_expand_first_conv3d(self, target_in_channels: int) -> Optional[str]:
+    def _maybe_adapt_first_conv3d(self, target_in_channels: int) -> Optional[str]:
+        """Replace the first Conv3d so it accepts ``target_in_channels`` inputs.
+
+        Handles both expansion (pretrained 11 -> 12 PET/CT, etc.) and
+        reduction (pretrained 11 -> 6 CT windows or -> 4 PET windows).
+        On expansion the pretrained weights are preserved and the new
+        channels are initialized per ``self.extra_channel_init``. On
+        reduction the channel semantics no longer match the pretrained
+        layout, so the layer is reinitialized with Kaiming.
+        """
         candidate_name = None
         candidate_module = None
         for name, module in self.visual.named_modules():
-            if isinstance(module, nn.Conv3d) and module.in_channels < target_in_channels:
+            if isinstance(module, nn.Conv3d):
                 candidate_name = name
                 candidate_module = module
                 break
@@ -209,13 +218,21 @@ class MultimodalAtlas(nn.Module):
         )
 
         with torch.no_grad():
-            new_conv.weight.zero_()
             old_in = candidate_module.in_channels
-            new_conv.weight[:, :old_in].copy_(candidate_module.weight)
-            if target_in_channels > old_in and self.extra_channel_init == "mean":
-                mean_weight = candidate_module.weight.mean(dim=1, keepdim=True)
-                repeat = target_in_channels - old_in
-                new_conv.weight[:, old_in:target_in_channels].copy_(mean_weight.repeat(1, repeat, 1, 1, 1))
+            if target_in_channels > old_in:
+                # Expansion: preserve pretrained channels, init the rest.
+                new_conv.weight.zero_()
+                new_conv.weight[:, :old_in].copy_(candidate_module.weight)
+                if self.extra_channel_init == "mean":
+                    mean_weight = candidate_module.weight.mean(dim=1, keepdim=True)
+                    repeat = target_in_channels - old_in
+                    new_conv.weight[:, old_in:target_in_channels].copy_(
+                        mean_weight.repeat(1, repeat, 1, 1, 1)
+                    )
+            else:
+                # Reduction: channel semantics differ from pretraining.
+                nn.init.kaiming_normal_(new_conv.weight, mode="fan_out", nonlinearity="relu")
+
             if candidate_module.bias is not None:
                 new_conv.bias.copy_(candidate_module.bias)
 
