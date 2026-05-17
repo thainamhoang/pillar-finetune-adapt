@@ -73,6 +73,9 @@ dataset:
     region: chest
     channels_mode: ct
     anatomy: "chest_ct"
+    # The dataset already returns 6-channel windowed CT volumes, so the
+    # engine's GPU-side windowing must be skipped (null is falsy).
+    windows: null
     label_columns:
       - abnormal_fdg_uptake
       - lymph_node

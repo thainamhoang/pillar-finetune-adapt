@@ -86,6 +86,9 @@ dataset:
     region: chest
     channels_mode: pet
     anatomy: "chest_ct"   # keep the modal_config key the backbone expects
+    # The dataset already returns 4-channel windowed PET volumes, so the
+    # engine's GPU-side windowing must be skipped (null is falsy).
+    windows: null
     label_columns:
       - abnormal_fdg_uptake
       - lymph_node
