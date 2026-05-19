@@ -182,8 +182,7 @@ class Classifier(Engine):
 
             # Clear cache before each evaluation step
             torch.cuda.empty_cache()
-
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast('cuda', enabled=False):
                 with torch.no_grad():
                     loss, logging_dict, predictions_dict = self.step(
                         model, batch, batch_idx, epoch=epoch, split=split, device=device
