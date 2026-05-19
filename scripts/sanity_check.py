@@ -456,9 +456,18 @@ def check_forward(config: dict, device: str) -> None:
     # ----- 5. D-axis identification -----
     section_header("5. D-axis identification in activ")
 
-    # Zero out the LAST input slice along the 4th input axis (which should map to D)
+    # The dataset emits (C, D, H, W); unsqueezed to (B, C, D, H, W), so the
+    # depth axis is INPUT axis 2 (size 64). After the (B,C,D,H,W)→(B,C,H,W,D)
+    # permute inside MultimodalAtlas.forward and the Conv3d patch_embed
+    # with kernel [8, 8, 4], depth becomes the last (smallest) spatial axis
+    # of activ. Expected mapping:
+    #   input axis 2 (D=64)   -> activ axis 4 (D_tok=16)
+    #   input axis 3 (H=256)  -> activ axis 2 (H_tok=32)
+    #   input axis 4 (W=256)  -> activ axis 3 (W_tok=32)
+    # Zero the last slice along input axis 2 (D) and verify the diff
+    # concentrates on activ axis 4.
     x_modified = x.clone()
-    x_modified[:, :, :, :, -1] = 0.0  # zero last slice along input axis 4
+    x_modified[:, :, -1, :, :] = 0.0  # zero last depth slice (input axis 2)
 
     try:
         with torch.no_grad():
@@ -468,30 +477,26 @@ def check_forward(config: dict, device: str) -> None:
         failed("d-axis", f"Comparison forward raised: {e}")
         return
 
-    # For each spatial axis of activ (2, 3, 4), measure where the difference concentrates
-    # If input axis 4 = D, and patch_size_D=4, then after our permute D ends up at output axis 4.
     per_axis_diff = []
     for axis in (2, 3, 4):
-        keep = [True, True, True]
-        keep_idx = axis - 2
-        # Sum diff along other spatial axes
-        reduce_dims = [i + 2 for i, k in enumerate(keep) if i != keep_idx]
-        # diff shape: (1, 1152, 32, 32, 16) — reduce across B, C, and the two other spatial axes
-        d = diff.mean(dim=(0, 1, *reduce_dims))
+        other_axes = tuple(a for a in (2, 3, 4) if a != axis)
+        # Mean-reduce across batch, channels, and the OTHER two spatial axes;
+        # keep the target axis to measure how much variance the perturbation
+        # induced along it.
+        d = diff.mean(dim=(0, 1) + other_axes)
         per_axis_diff.append(d)
 
     h_var, w_var, d_var = (a.var().item() for a in per_axis_diff)
-    info("d-axis", f"variance of mean-diff across axis 2 (H-tok=32): {h_var:.4e}")
-    info("d-axis", f"variance of mean-diff across axis 3 (W-tok=32): {w_var:.4e}")
-    info("d-axis", f"variance of mean-diff across axis 4 (D-tok=16): {d_var:.4e}")
-    # The axis with the highest variance is the one most affected by our spatial perturbation
+    info("d-axis", f"variance along activ axis 2 (H_tok=32): {h_var:.4e}")
+    info("d-axis", f"variance along activ axis 3 (W_tok=32): {w_var:.4e}")
+    info("d-axis", f"variance along activ axis 4 (D_tok=16): {d_var:.4e}")
     likely_d_axis = 2 + int(max(range(3), key=lambda i: [h_var, w_var, d_var][i]))
     if likely_d_axis == 4:
         passed("d-axis",
-               f"Input axis 4 (depth) maps to activ axis 4 — permute is consistent")
+               "Input axis 2 (D) maps to activ axis 4 (D_tok) — permute is correct")
     else:
         warned("d-axis",
-               f"Input axis 4 (depth) appears to map to activ axis {likely_d_axis}, not 4 — "
+               f"Input axis 2 (D) appears to map to activ axis {likely_d_axis}, not 4 — "
                "check permute / convention assumptions")
 
 
