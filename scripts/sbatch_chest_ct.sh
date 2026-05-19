@@ -4,7 +4,7 @@
 #SBATCH --error=/home/thahoa/PET/Pillar-0/pillar-finetune-adapt/logs/slurm/%x-%j.err
 #SBATCH --time=24:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=24
 #SBATCH --mem=128G
 #SBATCH --gpus=H200:1
 
@@ -34,9 +34,21 @@ export GLOO_SOCKET_IFNAME=lo
 echo "Allocated GPUs: $CUDA_VISIBLE_DEVICES"
 nvidia-smi --query-gpu=name,memory.total --format=csv
 
-# Background memory probe — prints peak host RAM use every 30s
+# Background memory probe — watches all python train.py processes every 30s
 ( while sleep 30; do
-    awk '/VmHWM|VmRSS/{printf "%s %s ", $1, $2}' /proc/$$/status; echo
+    PIDS=$(pgrep -f "scripts/train.py" || true)
+    if [[ -z "$PIDS" ]]; then
+        echo "[mem-probe] no train.py process yet"
+        continue
+    fi
+    for p in $PIDS; do
+        awk -v pid=$p '
+            /^VmHWM:/ { hwm = $2 }
+            /^VmRSS:/ { rss = $2 }
+            END { printf "[mem-probe] pid=%s VmHWM=%.1fGB VmRSS=%.1fGB\n",
+                         pid, hwm/1024/1024, rss/1024/1024 }
+        ' /proc/$p/status 2>/dev/null
+    done
   done ) &
 MEM_PROBE_PID=$!
 trap "kill $MEM_PROBE_PID 2>/dev/null || true" EXIT
