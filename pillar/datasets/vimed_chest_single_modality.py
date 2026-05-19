@@ -66,7 +66,7 @@ class ViMedChestSingleModalityDataset(Dataset):
         # never gets touched.
         x_raw = item["x_raw"]
         if self.channels_mode == "ct":
-            x = make_ct_windows_fast(x_raw[0])  # (6, D, H, W)
+            x = make_ct_windows_fast(x_raw[0])  # (11, D, H, W)
         else:
             x = make_pet_windows_fast(x_raw[1])  # (4, D, H, W)
 
