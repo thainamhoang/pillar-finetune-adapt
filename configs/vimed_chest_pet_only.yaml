@@ -63,7 +63,7 @@ engine:
 dataloader:
   batch_size: 1
   eval_batch_size: 1
-  num_workers: 8
+  num_workers: 12
   class_bal: False
   train_drop_last: False
   val_drop_last: False

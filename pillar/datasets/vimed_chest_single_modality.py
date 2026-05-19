@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import List, Optional
 
 import torch
 from torch.utils.data import Dataset
 
-from pillar.datasets.vimed_chest_report import ViMedChestReportDataset
+from pillar.utils.petct_windowing import (
+    make_ct_windows_fast,
+    make_pet_windows_fast,
+)
 
 
 class ViMedChestSingleModalityDataset(Dataset):
-    """Thin adapter exposing one of {ct_windows, pet_windows} as ``x``.
+    """Single-modality (CT or PET) view of the ViMED chest preprocessed cache.
 
-    Wraps ``ViMedChestReportDataset`` so the existing ``MultiStage`` training
-    loop can train a single-modality encoder (CT-only or PET-only) on the
-    same preprocessed ViMED cache.
+    Reads the manifest CSV, loads each ``.pt`` file lazily, and computes
+    windowing for *only* the requested modality. This avoids the ~40%
+    wasted CPU per sample incurred by proxying through
+    ``ViMedChestReportDataset``, which always computes both CT and PET
+    windows even when only one is consumed downstream.
     """
 
     def __init__(
@@ -35,43 +41,59 @@ class ViMedChestSingleModalityDataset(Dataset):
 
         split_alias = {"dev": "val"}
         resolved_split = split_alias.get(split_group, split_group)
-        self.inner = ViMedChestReportDataset(
-            manifest_path=csv_path,
-            split=resolved_split,
-            region=region,
-            include_raw=False,
-        )
+
+        manifest_path = Path(csv_path)
+        with manifest_path.open() as f:
+            rows = list(csv.DictReader(f))
+        rows = [r for r in rows if r.get("split") == resolved_split]
+        rows = [r for r in rows if r.get("region") == region]
+        self.rows = rows
+
         self.channels_mode = channels_mode
         self.anatomy = anatomy
         self.label_columns = list(label_columns) if label_columns is not None else None
         self.info: dict = {}
 
     def __len__(self) -> int:
-        return len(self.inner)
+        return len(self.rows)
 
     def __getitem__(self, idx: int) -> dict:
-        sample = self.inner[idx]
-        key = "ct_windows" if self.channels_mode == "ct" else "pet_windows"
-        x = sample[key].float()
+        row = self.rows[idx]
+        item = torch.load(row["tensor_path"], map_location="cpu", weights_only=False)
+
+        # x_raw is (2, D, H, W) with channel 0 = CT, channel 1 = PET. We
+        # slice the modality-specific channel before windowing so only one
+        # 33 MB float volume crosses to ct/pet helpers; the unused half
+        # never gets touched.
+        x_raw = item["x_raw"]
+        if self.channels_mode == "ct":
+            x = make_ct_windows_fast(x_raw[0])  # (6, D, H, W)
+        else:
+            x = make_pet_windows_fast(x_raw[1])  # (4, D, H, W)
+
         _, d, h, w = x.shape
         mask = torch.zeros((1, d, h, w), dtype=torch.bool)
 
-        labels = sample.get("labels", None)
-        label_names = sample.get("label_names", self.label_columns or [])
-        if labels is None and self.label_columns is not None:
+        labels = item.get("labels", None)
+        if isinstance(labels, torch.Tensor):
+            labels = labels.float()
+        elif labels is None and self.label_columns is not None:
             labels = torch.zeros(len(self.label_columns), dtype=torch.float32)
+
+        metadata = item.get("metadata", {})
+        report_text = metadata.get("report_text", row.get("report_text", ""))
 
         return {
             "x": x,
-            "y": labels.float() if isinstance(labels, torch.Tensor) else labels,
+            "y": labels,
             "mask": mask,
             "image_annotations": torch.zeros_like(mask, dtype=torch.float32),
             "has_annotation": False,
-            "accession": sample["study_id"],
-            "sample_name": sample["study_id"],
-            "study_id": sample["study_id"],
-            "region": sample["region"],
+            "accession": row["study_id"],
+            "sample_name": row["study_id"],
+            "study_id": row["study_id"],
+            "region": row["region"],
             "anatomy": self.anatomy,
-            "label_names": label_names,
-            "report_text": sample.get("report_text", ""),
+            "label_names": item.get("label_names", self.label_columns or []),
+            "report_text": report_text,
         }

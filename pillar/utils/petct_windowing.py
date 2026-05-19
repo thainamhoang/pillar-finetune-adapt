@@ -28,6 +28,66 @@ DUAL_STREAM_PET_WINDOWS = OrderedDict(
 )
 
 
+def _ct_window_constants() -> tuple[torch.Tensor, torch.Tensor]:
+    """Pre-stacked (low, divisor) pairs for the 6 CT windows, shape (6, 1, 1, 1)."""
+    lows, divs = [], []
+    for spec in DUAL_STREAM_CT_WINDOWS.values():
+        if "center" in spec:
+            lows.append(spec["center"] - spec["width"] / 2.0)
+            divs.append(spec["width"])
+        else:
+            lows.append(spec["lo"])
+            divs.append(spec["hi"] - spec["lo"])
+    return (
+        torch.tensor(lows, dtype=torch.float32).view(-1, 1, 1, 1),
+        torch.tensor(divs, dtype=torch.float32).view(-1, 1, 1, 1),
+    )
+
+
+def _pet_window_constants() -> tuple[torch.Tensor, torch.Tensor]:
+    """Pre-stacked (low, divisor) pairs for the 4 PET windows, shape (4, 1, 1, 1)."""
+    lows = torch.tensor([s["lo"] for s in DUAL_STREAM_PET_WINDOWS.values()], dtype=torch.float32)
+    divs = torch.tensor(
+        [s["hi"] - s["lo"] + 1e-6 for s in DUAL_STREAM_PET_WINDOWS.values()],
+        dtype=torch.float32,
+    )
+    return lows.view(-1, 1, 1, 1), divs.view(-1, 1, 1, 1)
+
+
+_CT_LOWS, _CT_DIVS = _ct_window_constants()
+_PET_LOWS, _PET_DIVS = _pet_window_constants()
+
+
+def make_ct_windows_fast(ct_dhw: torch.Tensor) -> torch.Tensor:
+    """Vectorized CT windowing.
+
+    Input: ``(D, H, W)`` HU tensor (or ``(1, D, H, W)``; the leading 1 is
+    squeezed). Output: ``(6, D, H, W)`` float32 in ``[0, 1]``.
+
+    Computes all 6 chest CT windows in a single broadcasted op instead
+    of looping over window specs and concatenating, removing 5 Python
+    iterations + a ``torch.cat`` from the per-sample CPU path.
+    """
+    if ct_dhw.ndim == 4:
+        ct_dhw = ct_dhw.squeeze(0)
+    # ct (1, D, H, W) broadcast against lows/divs (6, 1, 1, 1) -> (6, D, H, W)
+    out = (ct_dhw.float().unsqueeze(0) - _CT_LOWS) / _CT_DIVS
+    return out.clamp_(0.0, 1.0)
+
+
+def make_pet_windows_fast(pet_dhw: torch.Tensor) -> torch.Tensor:
+    """Vectorized PET windowing.
+
+    Input: ``(D, H, W)`` PET tensor normalized to ``[0, 1]`` (or
+    ``(1, D, H, W)``). Output: ``(4, D, H, W)`` float32.
+    """
+    if pet_dhw.ndim == 4:
+        pet_dhw = pet_dhw.squeeze(0)
+    pet = pet_dhw.float().clamp(0.0, 1.0)
+    out = (pet.unsqueeze(0) - _PET_LOWS) / _PET_DIVS
+    return out.clamp_(0.0, 1.0)
+
+
 def _window_ct(ct: torch.Tensor, center: float, width: float) -> torch.Tensor:
     low = center - width / 2.0
     return torch.clamp((ct - low) / width, 0.0, 1.0)
