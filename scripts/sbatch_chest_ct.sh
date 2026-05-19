@@ -4,7 +4,7 @@
 #SBATCH --error=/home/thahoa/PET/Pillar-0/pillar-finetune-adapt/logs/slurm/%x-%j.err
 #SBATCH --time=24:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=24
 #SBATCH --mem=128G
 #SBATCH --gpus=H200:1
 
@@ -34,9 +34,21 @@ export GLOO_SOCKET_IFNAME=lo
 echo "Allocated GPUs: $CUDA_VISIBLE_DEVICES"
 nvidia-smi --query-gpu=name,memory.total --format=csv
 
-# Background memory probe — prints peak host RAM use every 30s
+# Background memory probe — watches all python train.py processes every 30s
 ( while sleep 30; do
-    awk '/VmHWM|VmRSS/{printf "%s %s ", $1, $2}' /proc/$$/status; echo
+    PIDS=$(pgrep -f "scripts/train.py" || true)
+    if [[ -z "$PIDS" ]]; then
+        echo "[mem-probe] no train.py process yet"
+        continue
+    fi
+    for p in $PIDS; do
+        awk -v pid=$p '
+            /^VmHWM:/ { hwm = $2 }
+            /^VmRSS:/ { rss = $2 }
+            END { printf "[mem-probe] pid=%s VmHWM=%.1fGB VmRSS=%.1fGB\n",
+                         pid, hwm/1024/1024, rss/1024/1024 }
+        ' /proc/$p/status 2>/dev/null
+    done
   done ) &
 MEM_PROBE_PID=$!
 trap "kill $MEM_PROBE_PID 2>/dev/null || true" EXIT
@@ -58,10 +70,24 @@ torchrun \
   --opts \
       dataloader.batch_size 32 \
       dataloader.eval_batch_size 32 \
-      optimizer.kwargs.lr 2.8e-5 \
-      optimizer.scheduler.kwargs.warmup_epochs 3 \
-      engine.max_epochs 30 \
-      optimizer.scheduler.kwargs.max_epochs 30
+      optimizer.kwargs.lr 1.0e-5 \
+      optimizer.kwargs.weight_decay 0.1 \
+      engine.max_epochs 10 \
+      optimizer.scheduler.kwargs.max_epochs 10 \
+      optimizer.scheduler.kwargs.warmup_epochs 1
 TORCHRUN_EXIT=$?
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/train.py configs/vimed_chest_ct_only.yaml \
+  --opts \
+      dataloader.batch_size 32 \
+      dataloader.eval_batch_size 32 \
+      dataloader.num_workers 8 \
+      optimizer.kwargs.lr 2.0e-5 \
+      optimizer.kwargs.weight_decay 0.05 \
+      engine.max_epochs 12 \
+      optimizer.scheduler.kwargs.max_epochs 12 \
+      optimizer.scheduler.kwargs.warmup_epochs 2
 
 exit $TORCHRUN_EXIT

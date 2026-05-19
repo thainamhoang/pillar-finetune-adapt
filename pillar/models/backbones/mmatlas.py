@@ -2,19 +2,17 @@
 
 import torch
 import numpy as np
-from transformers import AutoModel, AutoConfig
+from transformers import AutoModel
 from transformers.modeling_utils import PreTrainedModel
 from torchvision.transforms import Compose, Normalize
 from torch import nn
 import torch.nn.functional as F
 import math
 from einops import rearrange
-from typing import Any, Dict, Optional
+from typing import Any
 from easydict import EasyDict
 from pathlib import Path
 import yaml
-import json
-from huggingface_hub import hf_hub_download
 from pillar.utils.logging import logger
 
 
@@ -41,7 +39,7 @@ def ensure_transformers_tied_weight_compat() -> None:
     PreTrainedModel.all_tied_weights_keys = all_tied_weights_keys
 
 
-def setup_device(device_spec: Optional[str] = None) -> torch.device:
+def setup_device(device_spec: str | None = None) -> torch.device:
     """
     Set up and validate device for model/data operations.
 
@@ -63,7 +61,7 @@ def setup_device(device_spec: Optional[str] = None) -> torch.device:
     return device
 
 
-def load_model_config(model_name: str) -> Dict[str, Any]:
+def load_model_config(model_name: str) -> dict[str, Any]:
     """
     Load model-specific configuration.
 
@@ -86,7 +84,7 @@ def load_model_config(model_name: str) -> Dict[str, Any]:
     return args
 
 
-def get_config_value(config: Dict[str, Any], key: str, default: Any = None) -> Any:
+def get_config_value(config: dict[str, Any], key: str, default: Any = None) -> Any:
     """
     Get value from config using dot notation (e.g., 'data.root_dir').
 
@@ -180,11 +178,11 @@ class MultimodalAtlas(nn.Module):
 
         logger.info(f"Model loaded successfully on device: {self.device}")
 
-    def _maybe_adapt_first_conv3d(self, target_in_channels: int) -> Optional[str]:
+    def _maybe_adapt_first_conv3d(self, target_in_channels: int) -> str | None:
         """Replace the first Conv3d so it accepts ``target_in_channels`` inputs.
 
         Handles both expansion (pretrained 11 -> 12 PET/CT, etc.) and
-        reduction (pretrained 11 -> 6 CT windows or -> 4 PET windows).
+        reduction (pretrained 11 -> 11 CT windows or -> 4 PET windows).
         On expansion the pretrained weights are preserved and the new
         channels are initialized per ``self.extra_channel_init``. On
         reduction the channel semantics no longer match the pretrained

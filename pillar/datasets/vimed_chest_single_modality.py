@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import os
 from pathlib import Path
-from typing import List, Optional
 
 import torch
 from torch.utils.data import Dataset
@@ -34,7 +33,7 @@ class ViMedChestSingleModalityDataset(Dataset):
         region: str = "chest",
         channels_mode: str = "ct",
         anatomy: str = "chest_ct",
-        label_columns: Optional[List[str]] = None,
+        label_columns: list[str] | None = None,
         **kwargs,
     ) -> None:
         del args, augmentations, kwargs

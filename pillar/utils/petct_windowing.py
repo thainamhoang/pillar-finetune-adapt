@@ -1,9 +1,7 @@
 """PET/CT windowing helpers for ViMED chest dual-stream experiments."""
 
 from __future__ import annotations
-
 from collections import OrderedDict
-
 import torch
 
 
@@ -34,12 +32,7 @@ DUAL_STREAM_PET_WINDOWS = OrderedDict(
 
 
 def _ct_window_constants() -> tuple[torch.Tensor, torch.Tensor]:
-    """Pre-stacked (low, divisor) pairs for the 11 CT windows, shape (11, 1, 1, 1).
-
-    The 11-channel set is chosen to match Pillar0-ChestCT's pretraining input
-    channel count, so the first Conv3d in the patch_embed loads the pretrained
-    weights verbatim (no Kaiming reinit on adaptation).
-    """
+    """Pre-stacked (low, divisor) pairs for the 11 CT windows, shape (11, 1, 1, 1)."""
     lows, divs = [], []
     for spec in DUAL_STREAM_CT_WINDOWS.values():
         if "center" in spec:
@@ -74,9 +67,9 @@ def make_ct_windows_fast(ct_dhw: torch.Tensor) -> torch.Tensor:
     Input: ``(D, H, W)`` HU tensor (or ``(1, D, H, W)``; the leading 1 is
     squeezed). Output: ``(11, D, H, W)`` float32 in ``[0, 1]``.
 
-    Computes all 11 chest CT windows in a single broadcasted op. The output
-    channel count matches Pillar0-ChestCT's pretrained patch_embed Conv3d
-    in_channels, so no Kaiming reinit happens on backbone adaptation.
+    Computes all 11 Pillar/RAVE-style CT windows in a single broadcasted op instead
+    of looping over window specs and concatenating, removing Python
+    iterations + a ``torch.cat`` from the per-sample CPU path.
     """
     if ct_dhw.ndim == 4:
         ct_dhw = ct_dhw.squeeze(0)

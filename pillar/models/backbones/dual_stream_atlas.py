@@ -217,7 +217,7 @@ class ViMedChestDualStreamEncoders(nn.Module):
 
     def __init__(
         self,
-        ct_channels: int = 6,
+        ct_channels: int = 11,
         pet_channels: int = 4,
         anatomy: str = "chest_ct",
         model_repo_id: str = "YalaLab/Pillar0-ChestCT",
