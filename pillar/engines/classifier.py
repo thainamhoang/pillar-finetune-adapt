@@ -43,20 +43,16 @@ def _memory_metrics() -> dict:
         max_rss_kb /= 1024
     metrics["mem/host_main_hwm_gb"] = max_rss_kb / (1024**2)
 
-    if _HAS_PSUTIL:
+    main = psutil.Process()
+    main_rss = main.memory_info().rss
+    total = main_rss
+    for child in main.children(recursive=True):
         try:
-            main = psutil.Process()
-            main_rss = main.memory_info().rss
-            total = main_rss
-            for child in main.children(recursive=True):
-                try:
-                    total += child.memory_info().rss
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-            metrics["mem/host_main_rss_gb"] = main_rss / 1e9
-            metrics["mem/host_total_rss_gb"] = total / 1e9
-        except Exception:
+            total += child.memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
+    metrics["mem/host_main_rss_gb"] = main_rss / 1e9
+    metrics["mem/host_total_rss_gb"] = total / 1e9
     return metrics
 
 
@@ -194,7 +190,7 @@ class Classifier(Engine):
                         step=self.global_step,
                     )
                 progress.display(batch_idx + 1, tqdm_write=True)
-                if log_loss_components == True and get_is_master() and not self.args.main.disable_wandb:
+                if log_loss_components and get_is_master() and not self.args.main.disable_wandb:
                     for k, v in logging_dict.items():
                         wandb.log({k: v}, step=self.global_step)
 
@@ -230,7 +226,7 @@ class Classifier(Engine):
             # Clear cache before each evaluation step
             torch.cuda.empty_cache()
 
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast('cuda', enabled=False):
                 with torch.no_grad():
                     loss, logging_dict, predictions_dict = self.step(
                         model, batch, batch_idx, epoch=epoch, split=split, device=device
@@ -256,7 +252,7 @@ class Classifier(Engine):
                 {f"{split}/loss": loss.detach().cpu(), **_memory_metrics()},
                 step=self.global_step,
             )
-            if log_loss_components == True:
+            if log_loss_components:
                 for k, v in logging_dict.items():
                     wandb.log({k: v}, step=self.global_step)
         # log epoch metrics
