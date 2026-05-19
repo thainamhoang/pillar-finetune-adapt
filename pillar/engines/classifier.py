@@ -8,6 +8,7 @@ import rve
 
 from pillar.utils.logging import logger
 from pillar.utils.engine import gather_predictions_dict, prefix_dict
+from pillar.utils.memdebug import print_mem
 from pillar.utils.misc import AverageMeter, Summary, ProgressMeter, get_is_master
 from timm.data.mixup import Mixup
 
@@ -145,8 +146,13 @@ class Classifier(Engine):
 
             if batch_idx % log_interval == 0:
                 if get_is_master() and not self.args.main.disable_wandb:
-                    wandb.log({"train/loss": loss.detach(), "lr": lr_value}, step=self.global_step)
+                    wandb.log(
+                        {"train/loss": loss.detach(), "lr": lr_value},
+                        step=self.global_step,
+                    )
                 progress.display(batch_idx + 1, tqdm_write=True)
+                if get_is_master():
+                    print_mem(f"train ep={epoch} step={batch_idx}")
                 if log_loss_components == True and get_is_master() and not self.args.main.disable_wandb:
                     for k, v in logging_dict.items():
                         wandb.log({k: v}, step=self.global_step)
@@ -209,6 +215,8 @@ class Classifier(Engine):
             if log_loss_components == True:
                 for k, v in logging_dict.items():
                     wandb.log({k: v}, step=self.global_step)
+        if get_is_master():
+            print_mem(f"{split} ep={epoch}")
         # log epoch metrics
         epoch_metrics = self.on_epoch_end(split=split, device=device, epoch=epoch, ckpt_dir=ckpt_dir)
         return epoch_metrics

@@ -9,12 +9,17 @@ import torch
 
 DUAL_STREAM_CT_WINDOWS = OrderedDict(
     [
-        ("wide", {"lo": -1024.0, "hi": 3071.0}),
         ("lung", {"center": -600.0, "width": 1500.0}),
-        ("mediastinum", {"center": 40.0, "width": 400.0}),
-        ("soft_tissue", {"center": 50.0, "width": 350.0}),
+        ("mediastinum", {"center": 50.0, "width": 400.0}),
+        ("abdomen", {"center": 40.0, "width": 400.0}),
+        ("liver", {"center": 80.0, "width": 150.0}),
         ("bone", {"center": 400.0, "width": 1800.0}),
-        ("liver", {"center": 60.0, "width": 160.0}),
+        ("brain", {"center": 40.0, "width": 80.0}),
+        ("subdural", {"center": 75.0, "width": 215.0}),
+        ("stroke", {"center": 40.0, "width": 40.0}),
+        ("temporal_bone", {"center": 600.0, "width": 2800.0}),
+        ("soft_tissue", {"center": 50.0, "width": 350.0}),
+        ("minmax", {"lo": -1024.0, "hi": 3071.0}),
     ]
 )
 
@@ -29,7 +34,12 @@ DUAL_STREAM_PET_WINDOWS = OrderedDict(
 
 
 def _ct_window_constants() -> tuple[torch.Tensor, torch.Tensor]:
-    """Pre-stacked (low, divisor) pairs for the 6 CT windows, shape (6, 1, 1, 1)."""
+    """Pre-stacked (low, divisor) pairs for the 11 CT windows, shape (11, 1, 1, 1).
+
+    The 11-channel set is chosen to match Pillar0-ChestCT's pretraining input
+    channel count, so the first Conv3d in the patch_embed loads the pretrained
+    weights verbatim (no Kaiming reinit on adaptation).
+    """
     lows, divs = [], []
     for spec in DUAL_STREAM_CT_WINDOWS.values():
         if "center" in spec:
@@ -62,15 +72,15 @@ def make_ct_windows_fast(ct_dhw: torch.Tensor) -> torch.Tensor:
     """Vectorized CT windowing.
 
     Input: ``(D, H, W)`` HU tensor (or ``(1, D, H, W)``; the leading 1 is
-    squeezed). Output: ``(6, D, H, W)`` float32 in ``[0, 1]``.
+    squeezed). Output: ``(11, D, H, W)`` float32 in ``[0, 1]``.
 
-    Computes all 6 chest CT windows in a single broadcasted op instead
-    of looping over window specs and concatenating, removing 5 Python
-    iterations + a ``torch.cat`` from the per-sample CPU path.
+    Computes all 11 chest CT windows in a single broadcasted op. The output
+    channel count matches Pillar0-ChestCT's pretrained patch_embed Conv3d
+    in_channels, so no Kaiming reinit happens on backbone adaptation.
     """
     if ct_dhw.ndim == 4:
         ct_dhw = ct_dhw.squeeze(0)
-    # ct (1, D, H, W) broadcast against lows/divs (6, 1, 1, 1) -> (6, D, H, W)
+    # ct (1, D, H, W) broadcast against lows/divs (11, 1, 1, 1) -> (11, D, H, W)
     out = (ct_dhw.float().unsqueeze(0) - _CT_LOWS) / _CT_DIVS
     return out.clamp_(0.0, 1.0)
 

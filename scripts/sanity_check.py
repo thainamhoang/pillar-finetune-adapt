@@ -285,7 +285,7 @@ def check_dataset(config: dict) -> None:
         return
 
     shared = dict(get(config, "dataset", "shared_dataset_kwargs", default={}) or {})
-    expected_channels = {"ct": 6, "pet": 4}
+    expected_channels = {"ct": 11, "pet": 4}
     expected_label_len = len(get(config, "dataset", "shared_dataset_kwargs", "label_columns", default=[]) or [])
 
     for mode, n_channels in expected_channels.items():
@@ -378,7 +378,7 @@ def check_forward(config: dict, device: str) -> None:
         return
 
     channels_mode = get(config, "dataset", "shared_dataset_kwargs", "channels_mode", default="ct")
-    n_channels = 6 if channels_mode == "ct" else 4
+    n_channels = 11 if channels_mode == "ct" else 4
 
     try:
         encoder = PillarInitializedAtlasEncoder(

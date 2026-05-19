@@ -73,8 +73,9 @@ dataset:
     region: chest
     channels_mode: ct
     anatomy: "chest_ct"
-    # The dataset already returns 6-channel windowed CT volumes, so the
-    # engine's GPU-side windowing must be skipped (null is falsy).
+    # The dataset already returns 11-channel windowed CT volumes (matching
+    # Pillar0-ChestCT's pretrained patch_embed in_channels), so the engine's
+    # GPU-side windowing must be skipped (null is falsy).
     windows: null
     label_columns:
       - abnormal_fdg_uptake
@@ -99,7 +100,11 @@ model:
       pretrained: True
       model_repo_id: YalaLab/Pillar0-ChestCT
       model_revision: main
-      input_channels: 6
+      # 11 channels matches Pillar0's pretrained patch_embed Conv3d
+      # in_channels, so _maybe_adapt_first_conv3d is a no-op and the
+      # pretrained patch-embed weights load verbatim. extra_channel_init
+      # is unused at this match.
+      input_channels: 11
       extra_channel_init: zero
 
     head_models:
