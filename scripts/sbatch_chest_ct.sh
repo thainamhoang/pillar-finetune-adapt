@@ -70,10 +70,11 @@ torchrun \
   --opts \
       dataloader.batch_size 32 \
       dataloader.eval_batch_size 32 \
-      optimizer.kwargs.lr 2.8e-5 \
-      optimizer.scheduler.kwargs.warmup_epochs 3 \
-      engine.max_epochs 30 \
-      optimizer.scheduler.kwargs.max_epochs 30
+      optimizer.kwargs.lr 1.0e-5 \
+      optimizer.kwargs.weight_decay 0.1 \
+      engine.max_epochs 10 \
+      optimizer.scheduler.kwargs.max_epochs 10 \
+      optimizer.scheduler.kwargs.warmup_epochs 1
 TORCHRUN_EXIT=$?
 
 exit $TORCHRUN_EXIT
