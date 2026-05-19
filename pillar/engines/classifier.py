@@ -227,7 +227,12 @@ class Classifier(Engine):
             # Clear cache before each evaluation step
             torch.cuda.empty_cache()
 
-            with torch.amp.autocast('cuda', enabled=False):
+            # Run eval forward under the same bf16-mixed autocast as training.
+            # The previous code disabled autocast on eval, which doubled
+            # activation memory for the forward pass (fp32) and raced with
+            # the next-batch worker for pinned host RAM. Losses and metrics
+            # are reduced in fp32 outside the autocast region.
+            with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
                 with torch.no_grad():
                     loss, logging_dict, predictions_dict = self.step(
                         model, batch, batch_idx, epoch=epoch, split=split, device=device

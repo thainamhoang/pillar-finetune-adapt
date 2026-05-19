@@ -90,9 +90,6 @@ class ViMedChestSingleModalityDataset(Dataset):
         else:
             x = make_pet_windows_fast(x_raw[1])  # (4, D, H, W)
 
-        _, d, h, w = x.shape
-        mask = torch.zeros((1, d, h, w), dtype=torch.bool)
-
         labels = item.get("labels", None)
         if isinstance(labels, torch.Tensor):
             labels = labels.float()
@@ -102,11 +99,23 @@ class ViMedChestSingleModalityDataset(Dataset):
         metadata = item.get("metadata", {})
         report_text = metadata.get("report_text", row.get("report_text", ""))
 
+        # Tiny zero placeholders for engine-required keys we never read.
+        # ViMED weak-label training has no per-voxel supervision; mask and
+        # image_annotations would otherwise be 4.2 MB (bool) + 16.8 MB (fp32)
+        # all-zero passengers in shm + pinned host memory per sample. At
+        # batch_size=32, prefetch_factor=2, num_workers=12 that's ~16 GB of
+        # in-flight zeros. Engine.preprocess_batch only reads these when
+        # use_gpu_augs is True, which is False in our configs; if ever
+        # enabled with this dataset, the GPU aug pipeline must lazy-expand
+        # these placeholders to (B, 1, D, H, W).
+        placeholder_bool = torch.zeros(1, dtype=torch.bool)
+        placeholder_float = torch.zeros(1, dtype=torch.float32)
+
         return {
             "x": x,
             "y": labels,
-            "mask": mask,
-            "image_annotations": torch.zeros_like(mask, dtype=torch.float32),
+            "mask": placeholder_bool,
+            "image_annotations": placeholder_float,
             "has_annotation": False,
             "accession": row["study_id"],
             "sample_name": row["study_id"],
