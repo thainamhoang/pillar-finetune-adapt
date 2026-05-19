@@ -1,4 +1,7 @@
+import resource
+import sys
 import time
+import psutil
 from collections import OrderedDict
 
 import torch
@@ -14,6 +17,47 @@ from timm.data.mixup import Mixup
 from .base import Engine
 
 from pillar import augmentations
+
+
+def _memory_metrics() -> dict:
+    """VRAM + host RAM snapshot to attach to every wandb log entry.
+
+    Keys:
+      mem/gpu_alloc_gb        current torch-allocated VRAM (main process)
+      mem/gpu_alloc_peak_gb   max torch-allocated VRAM since last reset
+      mem/gpu_reserved_gb     current torch-reserved VRAM (allocator pool)
+      mem/host_main_rss_gb    main-process RSS now (psutil required)
+      mem/host_total_rss_gb   main + all child workers RSS (psutil required)
+      mem/host_main_hwm_gb    main-process peak RSS via getrusage
+    Worker RSS is the usual OOM driver here; without psutil we only see
+    main-process RSS, which underestimates the true cgroup pressure.
+    """
+    metrics: dict = {}
+    if torch.cuda.is_available():
+        metrics["mem/gpu_alloc_gb"] = torch.cuda.memory_allocated() / 1e9
+        metrics["mem/gpu_alloc_peak_gb"] = torch.cuda.max_memory_allocated() / 1e9
+        metrics["mem/gpu_reserved_gb"] = torch.cuda.memory_reserved() / 1e9
+
+    max_rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":  # macOS reports bytes, Linux reports KB
+        max_rss_kb /= 1024
+    metrics["mem/host_main_hwm_gb"] = max_rss_kb / (1024**2)
+
+    if _HAS_PSUTIL:
+        try:
+            main = psutil.Process()
+            main_rss = main.memory_info().rss
+            total = main_rss
+            for child in main.children(recursive=True):
+                try:
+                    total += child.memory_info().rss
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            metrics["mem/host_main_rss_gb"] = main_rss / 1e9
+            metrics["mem/host_total_rss_gb"] = total / 1e9
+        except Exception:
+            pass
+    return metrics
 
 
 def get_augmentations(image_augmentations, args):
@@ -145,7 +189,10 @@ class Classifier(Engine):
 
             if batch_idx % log_interval == 0:
                 if get_is_master() and not self.args.main.disable_wandb:
-                    wandb.log({"train/loss": loss.detach(), "lr": lr_value}, step=self.global_step)
+                    wandb.log(
+                        {"train/loss": loss.detach(), "lr": lr_value, **_memory_metrics()},
+                        step=self.global_step,
+                    )
                 progress.display(batch_idx + 1, tqdm_write=True)
                 if log_loss_components == True and get_is_master() and not self.args.main.disable_wandb:
                     for k, v in logging_dict.items():
@@ -182,7 +229,8 @@ class Classifier(Engine):
 
             # Clear cache before each evaluation step
             torch.cuda.empty_cache()
-            with torch.amp.autocast('cuda', enabled=False):
+
+            with torch.cuda.amp.autocast(enabled=False):
                 with torch.no_grad():
                     loss, logging_dict, predictions_dict = self.step(
                         model, batch, batch_idx, epoch=epoch, split=split, device=device
@@ -204,7 +252,10 @@ class Classifier(Engine):
             torch.cuda.empty_cache()
 
         if get_is_master() and not self.args.main.disable_wandb:
-            wandb.log({f"{split}/loss": loss.detach().cpu()}, step=self.global_step)
+            wandb.log(
+                {f"{split}/loss": loss.detach().cpu(), **_memory_metrics()},
+                step=self.global_step,
+            )
             if log_loss_components == True:
                 for k, v in logging_dict.items():
                     wandb.log({k: v}, step=self.global_step)
