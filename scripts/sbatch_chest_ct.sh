@@ -5,7 +5,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --gpus=H200:1
 
 set -euo pipefail
@@ -33,6 +33,13 @@ export GLOO_SOCKET_IFNAME=lo
 
 echo "Allocated GPUs: $CUDA_VISIBLE_DEVICES"
 nvidia-smi --query-gpu=name,memory.total --format=csv
+
+# Background memory probe — prints peak host RAM use every 30s
+( while sleep 30; do
+    awk '/VmHWM|VmRSS/{printf "%s %s ", $1, $2}' /proc/$$/status; echo
+  done ) &
+MEM_PROBE_PID=$!
+trap "kill $MEM_PROBE_PID 2>/dev/null || true" EXIT
 
 NUM_GPUS=$(echo "$CUDA_VISIBLE_DEVICES" | tr "," "\n" | wc -l)
 export MASTER_ADDR=127.0.0.1
