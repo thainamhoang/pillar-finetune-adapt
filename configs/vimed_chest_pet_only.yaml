@@ -18,7 +18,7 @@
 
 experiment:
   name: dual-stream-pillar-pet
-  tags: ["pillar0", "chest", "pet", "phase2", "init-from-ct"]
+  tags: ["pillar0", "chest", "pet"]
   notes: "PET-only encoder fine-tune on ViMED chest weak labels. Init from Phase 1 CT checkpoint."
 
 main:
@@ -30,7 +30,7 @@ main:
 
   disable_wandb: False
   wandb_offline: False
-  wandb_project: muonHC
+  wandb_project: dual-stream-pillar
   wandb_entity: thainamhoang
 
   ckpt_freq: 1
