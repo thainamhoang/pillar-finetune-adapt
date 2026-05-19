@@ -63,13 +63,13 @@ engine:
 dataloader:
   batch_size: 1
   eval_batch_size: 1
-  num_workers: 4
+  num_workers: 12
   class_bal: False
   train_drop_last: False
   val_drop_last: False
   multi_gpu_eval: False
-  persistent_workers: False
-  prefetch_factor: null
+  persistent_workers: True
+  prefetch_factor: 2
   clip_grad: null
   no_shuffle_training_set: False
   use_null_collate: False

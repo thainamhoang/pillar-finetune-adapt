@@ -51,10 +51,10 @@ torchrun \
   --opts \
       dataloader.batch_size 32 \
       dataloader.eval_batch_size 32 \
-      dataloader.num_workers 12 \
-      engine.kwargs.accumulate_grad_batches 2 \
-      optimizer.kwargs.lr 4.0e-5 \
-      optimizer.scheduler.kwargs.warmup_epochs 3 \
+      # engine.kwargs.accumulate_grad_batches 2 \
+      # optimizer.kwargs.lr 4.0e-5 \
+      # optimizer.scheduler.kwargs.warmup_epochs 3 \
+      optimizer.kwargs.lr 2.8e-5 \
       engine.max_epochs 30 \
       optimizer.scheduler.kwargs.max_epochs 30
 TORCHRUN_EXIT=$?
