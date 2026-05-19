@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import csv
+import os
 from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset
 
+from pillar.utils.memdebug import print_mem
 from pillar.utils.petct_windowing import (
     make_ct_windows_fast,
     make_pet_windows_fast,
@@ -52,11 +54,29 @@ class ViMedChestSingleModalityDataset(Dataset):
         self.anatomy = anatomy
         self.label_columns = list(label_columns) if label_columns is not None else None
         self.info: dict = {}
+        # Per-worker counter for the memdebug probe in __getitem__.
+        # Each forked worker inherits 0 and counts independently.
+        self._mem_probe_count = 0
+        # Period (in samples) between memory probes; 0 disables.
+        self._mem_probe_every = int(os.environ.get("PILLAR_MEM_PROBE_EVERY", "100"))
 
     def __len__(self) -> int:
         return len(self.rows)
 
     def __getitem__(self, idx: int) -> dict:
+        # Memory probe: prints on the first call this worker handles, and
+        # every PILLAR_MEM_PROBE_EVERY samples thereafter. Lets us see
+        # per-worker RAM growth without spamming the log.
+        if self._mem_probe_every > 0 and (
+            self._mem_probe_count == 0
+            or self._mem_probe_count % self._mem_probe_every == 0
+        ):
+            print_mem(
+                f"dataset[{self.channels_mode}] worker pid={os.getpid()} "
+                f"count={self._mem_probe_count} idx={idx}"
+            )
+        self._mem_probe_count += 1
+
         row = self.rows[idx]
         item = torch.load(row["tensor_path"], map_location="cpu", weights_only=False)
 

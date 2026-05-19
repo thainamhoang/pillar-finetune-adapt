@@ -11,6 +11,7 @@ import rve
 
 from pillar.utils.logging import logger
 from pillar.utils.engine import gather_predictions_dict, prefix_dict
+from pillar.utils.memdebug import print_mem
 from pillar.utils.misc import AverageMeter, Summary, ProgressMeter, get_is_master
 from timm.data.mixup import Mixup
 
@@ -255,6 +256,8 @@ class Classifier(Engine):
             if log_loss_components:
                 for k, v in logging_dict.items():
                     wandb.log({k: v}, step=self.global_step)
+        if get_is_master():
+            print_mem(f"{split} ep={epoch}")
         # log epoch metrics
         epoch_metrics = self.on_epoch_end(split=split, device=device, epoch=epoch, ckpt_dir=ckpt_dir)
         return epoch_metrics
