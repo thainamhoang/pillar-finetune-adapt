@@ -120,6 +120,7 @@ class MultimodalAtlas(nn.Module):
         pretrained=False,
         input_channels=None,
         extra_channel_init="zero",
+        pretrained_backbone_ckpt: str | None = None,
     ):
         super().__init__()
         self.args = args
@@ -131,6 +132,12 @@ class MultimodalAtlas(nn.Module):
         self.pretrained = pretrained
         self.input_channels = input_channels
         self.extra_channel_init = extra_channel_init
+        # Optional second-stage init: overlay a previously-trained encoder
+        # state_dict (e.g. W_B from Phase 1 CT) ON TOP of the HF-pretrained
+        # weights, AFTER the first Conv3d has been adapted for the new
+        # input_channels. Loaded with strict=False so the resized Conv3d
+        # and any non-encoder keys (head, pool) are skipped.
+        self.pretrained_backbone_ckpt = pretrained_backbone_ckpt
 
         # Setup model
         self.setup_model()
@@ -165,6 +172,15 @@ class MultimodalAtlas(nn.Module):
                 logger.info(f"Adapted first Conv3d patch embed for {self.input_channels} input channels at {replaced}")
             else:
                 logger.warning(f"Requested input_channels={self.input_channels}, but no matching Conv3d was found")
+
+        # Overlay a previously-trained encoder state_dict, e.g. from Phase 1
+        # CT. Done AFTER the first-Conv3d adaptation so the resized layer
+        # keeps its Kaiming init (channel semantics differ across modalities).
+        # strict=False because head/pool keys live under a different prefix
+        # in the upstream checkpoint and the resized Conv3d shape won't
+        # match the saved one.
+        if self.pretrained_backbone_ckpt:
+            self._load_pretrained_backbone_ckpt(self.pretrained_backbone_ckpt)
 
         # Get hidden_dim from the model - check various possible attributes
         if hasattr(self.visual, "embed_dim"):
@@ -240,6 +256,55 @@ class MultimodalAtlas(nn.Module):
             parent = getattr(parent, part)
         setattr(parent, parts[-1], new_conv)
         return candidate_name
+
+    def _load_pretrained_backbone_ckpt(self, ckpt_path: str) -> None:
+        """Overlay a previously-trained encoder state_dict onto this backbone.
+
+        Accepts either of two checkpoint shapes:
+
+        - **encoder-only** dict where keys are the bare MultimodalAtlas
+          state_dict keys (produced by ``scripts/extract_encoder.py``).
+        - **full training checkpoint** dict with a ``"state_dict"`` or
+          ``"model"`` entry plus optimizer / scheduler; we strip the
+          ``backbone_model.`` prefix that ``MultiStage`` adds.
+
+        Uses ``strict=False`` so the resized first Conv3d (Kaiming-init,
+        different shape than what's saved) and any non-encoder keys are
+        skipped gracefully.
+        """
+        import os
+
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(
+                f"pretrained_backbone_ckpt={ckpt_path!r} does not exist"
+            )
+        logger.info(f"Loading pretrained backbone overlay from {ckpt_path}")
+        raw = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+
+        # Unwrap nested formats
+        if isinstance(raw, dict) and "state_dict" in raw:
+            sd = raw["state_dict"]
+        elif isinstance(raw, dict) and "model" in raw and isinstance(raw["model"], dict):
+            sd = raw["model"]
+        else:
+            sd = raw
+
+        # Strip leading "backbone_model." (from MultiStage) so keys map to
+        # MultimodalAtlas.state_dict() directly.
+        prefix = "backbone_model."
+        sd = {
+            (k[len(prefix):] if k.startswith(prefix) else k): v
+            for k, v in sd.items()
+        }
+
+        missing, unexpected = self.load_state_dict(sd, strict=False)
+        # The resized Conv3d will always show up as "unexpected" (saved
+        # shape doesn't match the new layer); that's by design.
+        logger.info(
+            f"Loaded pretrained backbone overlay: "
+            f"{len(missing)} missing, {len(unexpected)} unexpected. "
+            f"First few missing: {missing[:5]}  First few unexpected: {unexpected[:5]}"
+        )
 
     def preprocess_single(self, image):
         """
