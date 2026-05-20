@@ -6,14 +6,14 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=128G
-#SBATCH --gpus=H200:1
+#SBATCH --gpus=H100:1
 
 # Phase 2-A: PET-only fine-tune starting from HF Pillar0-ChestCT (W_A).
 # Baseline against which we evaluate the W_B (CT-trained init) variant.
 
 set -euo pipefail
 
-module load miniforge3 cuda h200 dev2025a cmake
+module load miniforge3 cuda h100 dev2025a cmake
 
 export CUDA_HOME=$(dirname $(dirname $(which nvcc)))
 export PATH="$CUDA_HOME/bin:$PATH"
