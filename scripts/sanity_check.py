@@ -354,13 +354,27 @@ def check_dataset(config: dict) -> None:
         else:
             warned(f"dataset[{mode}]", f"y is not a tensor (got {type(y).__name__})")
 
-        # Mask shape parity
+        # Mask shape. ViMedChestSingleModalityDataset returns a 1-element
+        # placeholder when has_annotation is False (the ViMED weak-label
+        # task has no per-voxel supervision), to avoid 21 MB of zero shm
+        # traffic per sample. Full (1, D, H, W) zero masks are only
+        # produced when annotations are present.
         mask = item["mask"]
-        if mask.shape[-3:] != x.shape[-3:]:
-            warned(f"dataset[{mode}]",
-                   f"mask spatial shape {tuple(mask.shape[-3:])} != x {tuple(x.shape[-3:])}")
+        has_annotation = bool(item.get("has_annotation", False))
+        if not has_annotation:
+            if mask.numel() <= 1:
+                passed(f"dataset[{mode}]",
+                       "mask is a 1-element placeholder (has_annotation=False, expected)")
+            else:
+                warned(f"dataset[{mode}]",
+                       f"mask is full-sized but has_annotation=False — "
+                       f"shm wasted on {tuple(mask.shape)} zeros")
         else:
-            passed(f"dataset[{mode}]", "mask spatial shape matches x")
+            if mask.shape[-3:] != x.shape[-3:]:
+                warned(f"dataset[{mode}]",
+                       f"mask spatial shape {tuple(mask.shape[-3:])} != x {tuple(x.shape[-3:])}")
+            else:
+                passed(f"dataset[{mode}]", "mask spatial shape matches x")
 
 
 # ----- 4. Model forward pass (optional, GPU) -----
