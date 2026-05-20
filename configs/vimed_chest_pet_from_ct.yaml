@@ -1,0 +1,177 @@
+# Phase 2-B: PET-only fine-tune initialized from the CT-trained
+# encoder (W_B), itself produced by Phase 1 from the HuggingFace
+# Pillar0-ChestCT weights (W_A).
+#
+# Stack:
+#   1. MultimodalAtlas loads HF Pillar0-ChestCT (W_A)
+#   2. First Conv3d is reinitialized for 4 PET channels (Kaiming)
+#   3. pretrained_backbone_ckpt overlays W_B with strict=False, which
+#      replaces the body weights (transformer blocks, pos-embeddings,
+#      etc.) with the CT-trained version while leaving the freshly
+#      Kaiming-init Conv3d alone
+#
+# REQUIRED BEFORE LAUNCHING THIS CONFIG:
+#   1. The Phase 1 CT run has finished and produced
+#      ./logs/dual-stream-pillar/ct/.../checkpoints/best.pt
+#   2. You have run scripts/extract_encoder.py to strip the head/pool
+#      and produce the encoder-only file referenced below.
+
+experiment:
+  name: dual-stream-pillar-pet-from-ct
+  tags: ["pillar0", "chest", "pet", "from-ct"]
+  notes: "PET-only encoder fine-tune from CT-trained init (W_B). Tests whether CT-phase domain adaptation helps PET."
+
+main:
+  exp_name: dual-stream-pillar-pet-from-ct
+  seed: 42
+  log_dir: ./logs
+  checkpoints_dir: ./logs/dual-stream-pillar/pet-from-ct
+  timestamp_save_dir: False
+
+  disable_wandb: False
+  wandb_offline: False
+  wandb_project: dual-stream-pillar
+  wandb_entity: thainamhoang
+
+  ckpt_freq: 1
+  monitor: val/macro_auroc
+
+  allow_overwriting_experiment_checkpoints: True
+  find_unused_parameters: True
+  force_loading_train_dataloader: False
+
+  phases:
+    train: True
+    dev: True
+    test: False
+
+engine:
+  type: Classifier
+  max_epochs: 10
+  kwargs:
+    resume: null
+    accumulate_grad_batches: 1
+    precision: bf16-mixed
+    binary_pred: True
+    log_loss_components: True
+    log_interval: 25
+    limit_num_batches: null
+    use_gpu_augs: False
+    train_gpu_augs: []
+    test_gpu_augs: []
+
+dataloader:
+  batch_size: 32
+  eval_batch_size: 32
+  num_workers: 12
+  class_bal: False
+  train_drop_last: False
+  val_drop_last: False
+  multi_gpu_eval: False
+  persistent_workers: True
+  prefetch_factor: 2
+  pin_memory: True
+  clip_grad: null
+  no_shuffle_training_set: False
+  use_null_collate: False
+  frac_train_samples: 1.0
+  no_cache_misses_allowed: False
+
+dataset:
+  type: ViMedChestSingleModalityDataset
+  modality: PET
+  num_classes: 8
+
+  shared_dataset_kwargs:
+    csv_path: /scratch/thahoa/PET/ViMed_prep_v2/manifest_splits.csv
+    region: chest
+    channels_mode: pet
+    anatomy: "chest_ct"
+    windows: null
+    label_columns:
+      - abnormal_fdg_uptake
+      - lymph_node
+      - mass_or_nodule
+      - metastasis_or_recurrence
+      - inflammation_or_hyperplasia
+      - suv_mentioned
+      - effusion_or_fluid
+      - no_abnormal_fdg
+
+model:
+  type: MultiStage
+  kwargs:
+    pool_name: MultiAttentionPool
+    pool_kwargs:
+      hidden_dim: 1152
+      conv_pool_kernel_size: 6
+
+    backbone_model_type: MultimodalAtlas
+    backbone_kwargs:
+      # Step 1: load HF Pillar0-ChestCT (W_A).
+      pretrained: True
+      model_repo_id: YalaLab/Pillar0-ChestCT
+      model_revision: main
+      # Step 2: adapt the first Conv3d for 4 PET channels (Kaiming reinit
+      # because PET windows have different semantics than CT windows).
+      input_channels: 4
+      extra_channel_init: kaiming
+      # Step 3: overlay the CT-trained encoder (W_B) on top of W_A.
+      # strict=False so the resized Conv3d keeps its Kaiming init and
+      # any head/pool keys in the source are silently skipped.
+      pretrained_backbone_ckpt: ./logs/dual-stream-pillar/ct/dual-stream-pillar-ct/checkpoints/encoder_only.pt
+
+    head_models:
+      classification:
+        type: Linear
+        kwargs:
+          input_dim: 1152
+          output_dim: 8
+          dropout_rate: 0.2
+        apply_pooling: True
+        use_pooled_features: False
+        enable_at_eval: True
+
+optimizer:
+  type: AdamW
+  kwargs:
+    lr: 1.0e-5
+    weight_decay: 0.1
+
+  scheduler:
+    interval: epoch
+    frequency: 1
+    type: CosineAnnealingWarmup
+    kwargs:
+      min_lr: 1.0e-6
+      warmup_epochs: 1
+      max_epochs: 10
+
+  layer_decay: 0.9
+
+metrics:
+  epoch_metrics:
+    train: &base_metrics
+      - type: MultilabelMetric
+        kwargs:
+          logit_key: classification
+          target_key: y
+          threshold: 0.5
+          label_names:
+            - abnormal_fdg_uptake
+            - lymph_node
+            - mass_or_nodule
+            - metastasis_or_recurrence
+            - inflammation_or_hyperplasia
+            - suv_mentioned
+            - effusion_or_fluid
+            - no_abnormal_fdg
+    val: *base_metrics
+    test: *base_metrics
+
+  losses:
+    - type: MultilabelBCELoss
+      weight: 1.0
+      kwargs:
+        logit_key: classification
+        target_key: y
