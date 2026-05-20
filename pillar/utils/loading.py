@@ -97,17 +97,23 @@ def get_train_dataset_loader(args, train_data):
 
     pin_memory = bool(getattr(args.dataloader, "pin_memory", True))
 
-    train_data_loader = data.DataLoader(
-        train_data,
+    # PyTorch requires prefetch_factor and persistent_workers to be left
+    # at their defaults when num_workers=0 (single-process loading), else
+    # DataLoader raises ValueError. Building the kwargs conditionally lets
+    # `--opts dataloader.num_workers 0` work for smoke tests / debugging.
+    loader_kwargs = dict(
         num_workers=args.dataloader.num_workers,
         sampler=sampler,
         pin_memory=pin_memory,
         batch_size=args.dataloader.batch_size,
-        prefetch_factor=args.dataloader.prefetch_factor,
-        persistent_workers=args.dataloader.persistent_workers,
         collate_fn=null_collate if use_null_collate else ignore_None_collate,
         drop_last=args.dataloader.train_drop_last,
     )
+    if args.dataloader.num_workers > 0:
+        loader_kwargs["prefetch_factor"] = args.dataloader.prefetch_factor
+        loader_kwargs["persistent_workers"] = args.dataloader.persistent_workers
+
+    train_data_loader = data.DataLoader(train_data, **loader_kwargs)
 
     return train_data_loader
 
