@@ -170,7 +170,14 @@ class Classifier(Engine):
             if epoch_metrics_configured:
                 # logging is not synchronized across processes
                 logging_dict = prefix_dict(logging_dict, "train/")
-                logging_dict["train/loss"] = loss.detach()
+                logging_dict = OrderedDict(
+                    (
+                        k,
+                        v.detach().to("cpu", non_blocking=True) if isinstance(v, torch.Tensor) else v,
+                    )
+                    for k, v in logging_dict.items()
+                )
+                logging_dict["train/loss"] = loss.detach().to("cpu", non_blocking=True)
 
                 result["logs"] = logging_dict
 

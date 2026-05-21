@@ -14,6 +14,16 @@ from pillar.utils.petct_windowing import (
 )
 
 
+def _resolve_torch_dtype(name: str | torch.dtype | None) -> torch.dtype:
+    if name is None or name == "float32" or name is torch.float32:
+        return torch.float32
+    if name == "float16" or name is torch.float16:
+        return torch.float16
+    if name == "bfloat16" or name is torch.bfloat16:
+        return torch.bfloat16
+    raise ValueError(f"Unsupported cpu_dtype={name!r}; expected float32, float16, or bfloat16")
+
+
 class ViMedChestSingleModalityDataset(Dataset):
     """Single-modality (CT or PET) view of the ViMED chest preprocessed cache.
 
@@ -34,6 +44,7 @@ class ViMedChestSingleModalityDataset(Dataset):
         channels_mode: str = "ct",
         anatomy: str = "chest_ct",
         label_columns: list[str] | None = None,
+        cpu_dtype: str | torch.dtype | None = "float32",
         **kwargs,
     ) -> None:
         del args, augmentations, kwargs
@@ -53,6 +64,7 @@ class ViMedChestSingleModalityDataset(Dataset):
         self.channels_mode = channels_mode
         self.anatomy = anatomy
         self.label_columns = list(label_columns) if label_columns is not None else None
+        self.cpu_dtype = _resolve_torch_dtype(cpu_dtype)
         self.info: dict = {}
         # Per-worker counter for the memdebug probe in __getitem__.
         # Each forked worker inherits 0 and counts independently.
@@ -86,9 +98,9 @@ class ViMedChestSingleModalityDataset(Dataset):
         # never gets touched.
         x_raw = item["x_raw"]
         if self.channels_mode == "ct":
-            x = make_ct_windows_fast(x_raw[0])  # (11, D, H, W)
+            x = make_ct_windows_fast(x_raw[0], dtype=self.cpu_dtype)  # (11, D, H, W)
         else:
-            x = make_pet_windows_fast(x_raw[1])  # (4, D, H, W)
+            x = make_pet_windows_fast(x_raw[1], dtype=self.cpu_dtype)  # (4, D, H, W)
 
         labels = item.get("labels", None)
         if isinstance(labels, torch.Tensor):

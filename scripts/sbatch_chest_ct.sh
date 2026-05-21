@@ -77,17 +77,4 @@ torchrun \
       optimizer.scheduler.kwargs.warmup_epochs 1
 TORCHRUN_EXIT=$?
 
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-CUDA_VISIBLE_DEVICES=0 \
-python scripts/train.py configs/vimed_chest_ct_only.yaml \
-  --opts \
-      dataloader.batch_size 32 \
-      dataloader.eval_batch_size 32 \
-      dataloader.num_workers 8 \
-      optimizer.kwargs.lr 2.0e-5 \
-      optimizer.kwargs.weight_decay 0.05 \
-      engine.max_epochs 12 \
-      optimizer.scheduler.kwargs.max_epochs 12 \
-      optimizer.scheduler.kwargs.warmup_epochs 2
-
 exit $TORCHRUN_EXIT

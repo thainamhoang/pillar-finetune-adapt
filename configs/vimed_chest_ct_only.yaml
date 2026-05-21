@@ -74,6 +74,10 @@ dataset:
     region: chest
     channels_mode: ct
     anatomy: "chest_ct"
+    # Keep CT dataloader IPC/pinned-memory footprint small enough for
+    # num_workers=12 + prefetch_factor=2 + persistent_workers. The engine
+    # casts x back to float32 on GPU before the model forward.
+    cpu_dtype: float16
     # The dataset already returns 11-channel windowed CT volumes (matching
     # Pillar0-ChestCT's pretrained patch_embed in_channels), so the engine's
     # GPU-side windowing must be skipped (null is falsy).

@@ -61,11 +61,34 @@ _CT_LOWS, _CT_DIVS = _ct_window_constants()
 _PET_LOWS, _PET_DIVS = _pet_window_constants()
 
 
-def make_ct_windows_fast(ct_dhw: torch.Tensor) -> torch.Tensor:
+def _broadcast_window_inplace(
+    volume_dhw: torch.Tensor,
+    lows: torch.Tensor,
+    divs: torch.Tensor,
+    *,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Create window channels with one CxDxHxW allocation.
+
+    The natural broadcast expression ``(x - lows) / divs`` materializes a
+    large intermediate tensor before division. Persistent dataloader workers
+    tend to keep those allocator arenas around, which makes ViMED runs look
+    like a host-RAM leak. Expanding then cloning once lets the arithmetic stay
+    in-place on the final output tensor.
+    """
+    volume = volume_dhw.to(dtype=dtype, copy=False)
+    out = volume.unsqueeze(0).expand(lows.shape[0], *volume.shape).clone()
+    lows = lows.to(device=out.device, dtype=out.dtype)
+    divs = divs.to(device=out.device, dtype=out.dtype)
+    out.sub_(lows).div_(divs).clamp_(0.0, 1.0)
+    return out
+
+
+def make_ct_windows_fast(ct_dhw: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     """Vectorized CT windowing.
 
     Input: ``(D, H, W)`` HU tensor (or ``(1, D, H, W)``; the leading 1 is
-    squeezed). Output: ``(11, D, H, W)`` float32 in ``[0, 1]``.
+    squeezed). Output: ``(11, D, H, W)`` in ``[0, 1]`` using ``dtype``.
 
     Computes all 11 Pillar/RAVE-style CT windows in a single broadcasted op instead
     of looping over window specs and concatenating, removing Python
@@ -73,22 +96,18 @@ def make_ct_windows_fast(ct_dhw: torch.Tensor) -> torch.Tensor:
     """
     if ct_dhw.ndim == 4:
         ct_dhw = ct_dhw.squeeze(0)
-    # ct (1, D, H, W) broadcast against lows/divs (11, 1, 1, 1) -> (11, D, H, W)
-    out = (ct_dhw.float().unsqueeze(0) - _CT_LOWS) / _CT_DIVS
-    return out.clamp_(0.0, 1.0)
+    return _broadcast_window_inplace(ct_dhw, _CT_LOWS, _CT_DIVS, dtype=dtype)
 
 
-def make_pet_windows_fast(pet_dhw: torch.Tensor) -> torch.Tensor:
+def make_pet_windows_fast(pet_dhw: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     """Vectorized PET windowing.
 
     Input: ``(D, H, W)`` PET tensor normalized to ``[0, 1]`` (or
-    ``(1, D, H, W)``). Output: ``(4, D, H, W)`` float32.
+    ``(1, D, H, W)``). Output: ``(4, D, H, W)`` using ``dtype``.
     """
     if pet_dhw.ndim == 4:
         pet_dhw = pet_dhw.squeeze(0)
-    pet = pet_dhw.float().clamp(0.0, 1.0)
-    out = (pet.unsqueeze(0) - _PET_LOWS) / _PET_DIVS
-    return out.clamp_(0.0, 1.0)
+    return _broadcast_window_inplace(pet_dhw, _PET_LOWS, _PET_DIVS, dtype=dtype)
 
 
 def _window_ct(ct: torch.Tensor, center: float, width: float) -> torch.Tensor:
