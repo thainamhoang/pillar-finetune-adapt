@@ -22,6 +22,14 @@ class EncoderConfig:
     model_revision: str = "main"
     device: Optional[str] = None
     patch_embed_init: str = "kaiming"
+    # Optional path to a previously-trained encoder state_dict to overlay on
+    # top of the HF-pretrained weights. When set, channel adaptation AND
+    # overlay loading are routed through ``MultimodalAtlas`` (rather than
+    # this module's external ``_adapt_first_conv3d``) so the adapt-then-load
+    # order is correct: the freshly target-channel Conv3d shape matches the
+    # saved Conv3d (e.g. the trained PET 4ch conv is preserved instead of
+    # being dropped by the shape-mismatch filter and re-Kaiming-init'd).
+    pretrained_backbone_ckpt: Optional[str] = None
 
 
 def _find_first_conv3d(module: nn.Module) -> tuple[str, nn.Conv3d]:
@@ -186,20 +194,49 @@ class PillarInitializedAtlasEncoder(nn.Module):
     def __init__(self, config: EncoderConfig):
         super().__init__()
         self.config = config
-        self.backbone = MultimodalAtlas(
-            args=None,
-            device=config.device,
-            model_repo_id=config.model_repo_id,
-            model_revision=config.model_revision,
-            pretrained=True,
-        )
-        replaced_name = _adapt_first_conv3d(
-            self.backbone.visual,
-            target_in_channels=config.input_channels,
-            init=config.patch_embed_init,
-        )
+        if config.pretrained_backbone_ckpt is not None:
+            # Route channel adaptation AND overlay loading through
+            # MultimodalAtlas so the order is adapt-then-overlay. This is
+            # critical for the dual-stream export: a trained PET 4-channel
+            # Conv3d in the overlay checkpoint must hit a freshly-adapted
+            # 4-channel layer (shape match -> load), not the HF 11-channel
+            # layer (shape mismatch -> dropped, then re-Kaiming'd here,
+            # losing the trained weights).
+            self.backbone = MultimodalAtlas(
+                args=None,
+                device=config.device,
+                model_repo_id=config.model_repo_id,
+                model_revision=config.model_revision,
+                pretrained=True,
+                input_channels=config.input_channels,
+                pretrained_backbone_ckpt=config.pretrained_backbone_ckpt,
+            )
+            # MultimodalAtlas._maybe_adapt_first_conv3d already swapped the
+            # first Conv3d (when needed). Record its name for downstream use.
+            first_conv_name = None
+            for name, module in self.backbone.visual.named_modules():
+                if isinstance(module, nn.Conv3d):
+                    first_conv_name = name
+                    break
+            self.input_adapter_name = first_conv_name
+        else:
+            # Default path (no overlay): keep the original
+            # build-HF-then-external-adapt sequence. Used by
+            # sanity_check.py and any single-stream training config that
+            # does NOT supply a pretrained_backbone_ckpt.
+            self.backbone = MultimodalAtlas(
+                args=None,
+                device=config.device,
+                model_repo_id=config.model_repo_id,
+                model_revision=config.model_revision,
+                pretrained=True,
+            )
+            self.input_adapter_name = _adapt_first_conv3d(
+                self.backbone.visual,
+                target_in_channels=config.input_channels,
+                init=config.patch_embed_init,
+            )
         _patch_posemb_modules(self.backbone.visual)
-        self.input_adapter_name = replaced_name
         self.hidden_dim = self.backbone.hidden_dim
 
     def forward(self, x: torch.Tensor) -> dict:
@@ -224,6 +261,8 @@ class ViMedChestDualStreamEncoders(nn.Module):
         model_revision: str = "main",
         device: Optional[str] = None,
         patch_embed_init: str = "kaiming",
+        ct_pretrained_backbone_ckpt: Optional[str] = None,
+        pet_pretrained_backbone_ckpt: Optional[str] = None,
     ) -> None:
         super().__init__()
         common = dict(
@@ -234,10 +273,18 @@ class ViMedChestDualStreamEncoders(nn.Module):
             patch_embed_init=patch_embed_init,
         )
         self.ct_encoder = PillarInitializedAtlasEncoder(
-            EncoderConfig(input_channels=ct_channels, **common)
+            EncoderConfig(
+                input_channels=ct_channels,
+                pretrained_backbone_ckpt=ct_pretrained_backbone_ckpt,
+                **common,
+            )
         )
         self.pet_encoder = PillarInitializedAtlasEncoder(
-            EncoderConfig(input_channels=pet_channels, **common)
+            EncoderConfig(
+                input_channels=pet_channels,
+                pretrained_backbone_ckpt=pet_pretrained_backbone_ckpt,
+                **common,
+            )
         )
 
     def forward(self, ct_windows: torch.Tensor, pet_windows: torch.Tensor) -> dict:
@@ -248,4 +295,152 @@ class ViMedChestDualStreamEncoders(nn.Module):
             "ct_pooled": ct_out["pooled"],
             "pet_activ": pet_out["activ"],
             "pet_pooled": pet_out["pooled"],
+        }
+
+
+class TokenConcatFusion(nn.Module):
+    """Fuse CT and PET encoder activations into a single token sequence.
+
+    Each encoder emits ``activ`` of shape ``(B, token_dim, H, W, D)`` (default
+    Pillar0 Atlas-small: ``(B, 1152, 32, 32, 16)``). This module flattens
+    both to ``(B, H*W*D, token_dim)``, adds:
+
+    - a **per-modality type embedding** (2 learnable vectors, CT=[0], PET=[1])
+    - a **shared 3D positional embedding** -- the same parameter is added to
+      both CT and PET tokens at matching grid positions.
+
+    Then concatenates along the token axis to produce ``(B, 2*H*W*D, token_dim)``.
+    For the default grid that's ``(B, 32768, 1152)`` -- the contract for the
+    downstream Q-Former / LLM decoder.
+
+    Why share the positional embedding across modalities? CT and PET are
+    hardware-co-registered (same PET/CT scanner), so a CT voxel at ``(z,y,x)``
+    and the PET voxel at the same ``(z,y,x)`` correspond physically. Sharing
+    ``pos_embed`` makes that anatomical co-location explicit and lets the
+    downstream attention layer (Q-Former cross-attn, or the LLM's own attn)
+    bind tokens across modalities by position for free.
+
+    Parameter count is tiny (~58K = grid*1152 + 2*1152). These are initialized
+    but **untrained at export time**; they pick up signal in the Phase B
+    Q-Former + LLM training run.
+    """
+
+    def __init__(
+        self,
+        token_dim: int = 1152,
+        grid: tuple[int, int, int] = (32, 32, 16),
+    ) -> None:
+        super().__init__()
+        self.token_dim = token_dim
+        self.grid = tuple(grid)
+        H, W, D = self.grid
+        self.num_tokens_per_modality = H * W * D
+
+        # (2, C): index 0 = CT, index 1 = PET.
+        self.modality_type_embed = nn.Parameter(torch.zeros(2, token_dim))
+        # (1, N, C) shared across modalities.
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, self.num_tokens_per_modality, token_dim)
+        )
+        nn.init.trunc_normal_(self.modality_type_embed, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def _flatten_activ(self, activ: torch.Tensor) -> torch.Tensor:
+        """``(B, C, H, W, D) -> (B, H*W*D, C)`` with shape sanity checks."""
+        if activ.ndim != 5:
+            raise ValueError(
+                f"Expected activ shape (B, C, H, W, D); got {tuple(activ.shape)}"
+            )
+        B, C, H, W, D = activ.shape
+        if (H, W, D) != self.grid:
+            raise ValueError(
+                f"activ spatial dims {(H, W, D)} != configured grid {self.grid}; "
+                f"check that the encoder's H_tok/W_tok/D_tok output matches."
+            )
+        if C != self.token_dim:
+            raise ValueError(
+                f"activ channel dim {C} != configured token_dim {self.token_dim}"
+            )
+        return activ.flatten(start_dim=2).transpose(1, 2).contiguous()
+
+    def forward(self, ct_activ: torch.Tensor, pet_activ: torch.Tensor) -> torch.Tensor:
+        ct_tokens = self._flatten_activ(ct_activ)      # (B, N, C)
+        pet_tokens = self._flatten_activ(pet_activ)    # (B, N, C)
+
+        ct_tokens = ct_tokens + self.pos_embed + self.modality_type_embed[0]
+        pet_tokens = pet_tokens + self.pos_embed + self.modality_type_embed[1]
+
+        # (B, 2N, C). Layout convention: CT first, then PET. The downstream
+        # Q-Former / LLM treats the whole sequence uniformly; modality-type
+        # embed is what distinguishes them, not their index in the sequence.
+        return torch.cat([ct_tokens, pet_tokens], dim=1)
+
+
+class ViMedChestDualStreamFusedEncoder(nn.Module):
+    """Single MultiStage-resolvable backbone: dual-stream encoders + concat fusion.
+
+    Composes :class:`ViMedChestDualStreamEncoders` with
+    :class:`TokenConcatFusion` to produce, from paired CT/PET windowed
+    inputs, a single ``(B, 32768, 1152)`` token sequence and an averaged
+    ``(B, 1152)`` pooled vector.
+
+    Accepts either a positional ``(ct_windows, pet_windows)`` call or a
+    dict with keys ``"ct_windows"`` and ``"pet_windows"``, so it slots into
+    both ad-hoc scripts and ``MultiStage``-driven training (which passes the
+    whole batch dict to the backbone).
+    """
+
+    def __init__(
+        self,
+        ct_channels: int = 11,
+        pet_channels: int = 4,
+        anatomy: str = "chest_ct",
+        model_repo_id: str = "YalaLab/Pillar0-ChestCT",
+        model_revision: str = "main",
+        device: Optional[str] = None,
+        patch_embed_init: str = "kaiming",
+        ct_pretrained_backbone_ckpt: Optional[str] = None,
+        pet_pretrained_backbone_ckpt: Optional[str] = None,
+        token_dim: int = 1152,
+        grid: tuple[int, int, int] = (32, 32, 16),
+    ) -> None:
+        super().__init__()
+        self.dual_stream = ViMedChestDualStreamEncoders(
+            ct_channels=ct_channels,
+            pet_channels=pet_channels,
+            anatomy=anatomy,
+            model_repo_id=model_repo_id,
+            model_revision=model_revision,
+            device=device,
+            patch_embed_init=patch_embed_init,
+            ct_pretrained_backbone_ckpt=ct_pretrained_backbone_ckpt,
+            pet_pretrained_backbone_ckpt=pet_pretrained_backbone_ckpt,
+        )
+        self.fusion = TokenConcatFusion(token_dim=token_dim, grid=grid)
+        self.token_dim = token_dim
+        self.grid = tuple(grid)
+        self.num_tokens = 2 * self.fusion.num_tokens_per_modality
+        self.hidden_dim = token_dim  # mirrors MultimodalAtlas.hidden_dim contract
+
+    def forward(self, batch_or_ct, pet_windows: Optional[torch.Tensor] = None) -> dict:
+        if isinstance(batch_or_ct, dict):
+            ct_windows = batch_or_ct["ct_windows"]
+            pet_windows = batch_or_ct["pet_windows"]
+        else:
+            ct_windows = batch_or_ct
+            if pet_windows is None:
+                raise ValueError(
+                    "ViMedChestDualStreamFusedEncoder.forward needs a dict with "
+                    "'ct_windows' / 'pet_windows' OR two positional tensors."
+                )
+        encs = self.dual_stream(ct_windows, pet_windows)
+        fused = self.fusion(encs["ct_activ"], encs["pet_activ"])
+        return {
+            "activ": fused,                # (B, 32768, 1152)
+            "pooled": fused.mean(dim=1),   # (B, 1152)
+            # Also expose the per-modality outputs for ablation / debugging.
+            "ct_activ": encs["ct_activ"],
+            "pet_activ": encs["pet_activ"],
+            "ct_pooled": encs["ct_pooled"],
+            "pet_pooled": encs["pet_pooled"],
         }
