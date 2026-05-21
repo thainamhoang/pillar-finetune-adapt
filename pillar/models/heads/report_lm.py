@@ -131,7 +131,24 @@ class ReportLM(nn.Module):
         if added > 0:
             self._resize_token_embeddings_with_mean_init(added)
 
-        self.hidden_size = self.model.config.hidden_size
+        # Resolve text hidden_size robustly. Multimodal causal LMs (Gemma3,
+        # PaliGemma, LLaVA, etc.) nest the text decoder config under
+        # ``config.text_config`` and the top-level ``config.hidden_size``
+        # may be missing or refer to the vision tower. Walk the config and
+        # fall back to the input-embedding width, which IS the hidden dim
+        # by construction.
+        self.hidden_size = self._resolve_text_hidden_size()
+        # Log the resolved model class + hidden size so it's visible in
+        # smoke output (the failure mode this guards against is silently
+        # picking the vision hidden dim instead of the text one).
+        try:
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                f"ReportLM: loaded {type(self.model).__name__} "
+                f"(hidden_size={self.hidden_size}, vocab={len(self.tokenizer)})"
+            )
+        except Exception:
+            pass
 
         # ---- freeze + LoRA ----
         if freeze_lm:
@@ -139,6 +156,33 @@ class ReportLM(nn.Module):
                 p.requires_grad = False
         if apply_lora:
             self._apply_lora(lora if lora is not None else LoRAConfig())
+
+    # --- config resolution helpers ---
+
+    def _resolve_text_hidden_size(self) -> int:
+        """Robust hidden-size resolver for both pure-text and multimodal LMs.
+
+        Tries, in order:
+          1. ``config.hidden_size`` (Llama, Qwen, Mistral, Gemma2, ...)
+          2. ``config.text_config.hidden_size`` (Gemma3 + multimodal,
+             PaliGemma, LLaVA-family configs)
+          3. ``model.get_input_embeddings().weight.shape[1]`` (last-resort
+             but always correct -- by definition the input embedding dim
+             IS the text hidden size).
+        """
+        cfg = self.model.config
+        if hasattr(cfg, "hidden_size") and isinstance(getattr(cfg, "hidden_size"), int):
+            return cfg.hidden_size
+        text_cfg = getattr(cfg, "text_config", None)
+        if text_cfg is not None and hasattr(text_cfg, "hidden_size"):
+            return int(text_cfg.hidden_size)
+        emb = self.model.get_input_embeddings()
+        if emb is not None and emb.weight is not None:
+            return int(emb.weight.shape[1])
+        raise AttributeError(
+            f"Could not resolve text hidden_size on "
+            f"{type(self.model).__name__}; inspect config manually."
+        )
 
     # --- embedding-table extension ---
 
