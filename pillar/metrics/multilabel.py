@@ -59,15 +59,19 @@ class MultilabelMetric(AbstractMetric):
         macro_recall = []
         stats = OrderedDict()
 
+        y_int = target.int()
+        positives = y_int.sum(dim=0)
+        negatives = (y_int == 0).sum(dim=0)
+
         for idx, name in enumerate(label_names):
-            y = target[:, idx].int()
+            y = y_int[:, idx]
             p = probs[:, idx]
             yhat = preds[:, idx]
 
-            positives = int(y.sum().item())
-            negatives = int((y == 0).sum().item())
+            pos_count = int(positives[idx].item())
+            neg_count = int(negatives[idx].item())
 
-            if positives > 0 and negatives > 0:
+            if pos_count > 0 and neg_count > 0:
                 label_auroc = auroc(p, y, task="binary")
                 label_ap = average_precision(p, y, task="binary")
                 macro_auroc.append(label_auroc)
