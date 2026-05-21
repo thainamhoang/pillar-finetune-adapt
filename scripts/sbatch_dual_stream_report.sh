@@ -57,6 +57,10 @@ export NCCL_SOCKET_FAMILY=AF_INET
 export NCCL_IB_DISABLE=1
 export NCCL_SOCKET_IFNAME=lo
 export GLOO_SOCKET_IFNAME=lo
+# HF tokenizers warns when DataLoader workers fork after a tokenizer has
+# been used in the main process. Setting this avoids the noisy warning
+# and is the documented HF recommendation when using multi-worker loading.
+export TOKENIZERS_PARALLELISM=false
 
 # HF cache lives on /scratch so it doesn't fill the home quota with the
 # ~9 GB MedGemma weights.
