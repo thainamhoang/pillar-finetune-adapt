@@ -409,4 +409,18 @@ class Classifier(Engine):
             loss, logging_dict = self.compute_step_metrics(
                 loss_input=metric_input, metric_input=metric_input, train=(split == "train")
             )
+
+        # Detach + move to CPU before the dict gets appended to
+        # *_step_outputs by the calling loop. This (a) severs any autograd
+        # graph references so backward() can release the activation chain
+        # for the current batch immediately, (b) frees the predictions'
+        # VRAM footprint, and (c) lets gather_step_outputs concatenate
+        # on host without lingering GPU copies. Tensors here are tiny
+        # (target labels + head logits, ~256 B per batch at bs=32, 8
+        # labels), so the host→device transfer cost is negligible.
+        predictions_dict = {
+            k: (v.detach().to("cpu", non_blocking=True) if isinstance(v, torch.Tensor) else v)
+            for k, v in predictions_dict.items()
+        }
+
         return loss, logging_dict, predictions_dict

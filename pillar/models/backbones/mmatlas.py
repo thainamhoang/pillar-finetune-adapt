@@ -268,9 +268,12 @@ class MultimodalAtlas(nn.Module):
           ``"model"`` entry plus optimizer / scheduler; we strip the
           ``backbone_model.`` prefix that ``MultiStage`` adds.
 
-        Uses ``strict=False`` so the resized first Conv3d (Kaiming-init,
-        different shape than what's saved) and any non-encoder keys are
-        skipped gracefully.
+        Uses ``strict=False`` so non-encoder keys are skipped gracefully,
+        AND pre-filters any keys whose tensor shape disagrees with the
+        current model (e.g. the freshly Kaiming-init first Conv3d when
+        adapting from 11 -> 4 channels). ``strict=False`` alone is NOT
+        enough -- PyTorch still raises on shape mismatches for keys that
+        exist in both source and destination.
         """
         import os
 
@@ -297,12 +300,30 @@ class MultimodalAtlas(nn.Module):
             for k, v in sd.items()
         }
 
-        missing, unexpected = self.load_state_dict(sd, strict=False)
-        # The resized Conv3d will always show up as "unexpected" (saved
-        # shape doesn't match the new layer); that's by design.
+        # Drop keys whose shape doesn't match the current model. This is
+        # how the resized first Conv3d (CT 11ch -> PET 4ch reduction) is
+        # handled: the new Kaiming-init layer keeps its weights, and the
+        # saved [64, 11, 3, 3, 3] tensor is skipped.
+        current = self.state_dict()
+        shape_mismatch = []
+        kept = {}
+        for k, v in sd.items():
+            if k in current and isinstance(v, torch.Tensor) and v.shape != current[k].shape:
+                shape_mismatch.append((k, tuple(v.shape), tuple(current[k].shape)))
+            else:
+                kept[k] = v
+        if shape_mismatch:
+            logger.info(
+                f"Dropping {len(shape_mismatch)} key(s) due to shape mismatch "
+                f"(expected when adapting input channels). First few: "
+                f"{[(k, src, dst) for k, src, dst in shape_mismatch[:3]]}"
+            )
+
+        missing, unexpected = self.load_state_dict(kept, strict=False)
         logger.info(
             f"Loaded pretrained backbone overlay: "
-            f"{len(missing)} missing, {len(unexpected)} unexpected. "
+            f"{len(missing)} missing, {len(unexpected)} unexpected, "
+            f"{len(shape_mismatch)} shape-mismatched (skipped). "
             f"First few missing: {missing[:5]}  First few unexpected: {unexpected[:5]}"
         )
 

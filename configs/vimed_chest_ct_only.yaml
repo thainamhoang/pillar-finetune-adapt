@@ -57,6 +57,7 @@ dataloader:
   multi_gpu_eval: False
   persistent_workers: True
   prefetch_factor: 2
+  pin_memory: True
   clip_grad: null
   no_shuffle_training_set: False
   use_null_collate: False
