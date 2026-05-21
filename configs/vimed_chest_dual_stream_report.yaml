@@ -146,10 +146,16 @@ optimizer:
   scheduler:
     interval: epoch
     frequency: 1
-    type: ConstantWarmup             # 100-step warmup, constant after (paper)
+    # Paper uses 100-step warmup then constant. pillar's ConstantWarmup
+    # is in (fractional) epoch units, scaled via
+    # adjust_learning_rate(batch_idx / len(dataloader) + epoch).
+    # With ~600 ViMED chest train samples / effective_batch=16 = ~37
+    # optimizer steps/epoch, 1 epoch of warmup ≈ 37 steps -- close enough
+    # to the paper's 100-step intent without overcooking on our smaller set.
+    type: ConstantWarmup
     kwargs:
-      warmup_steps: 100
-      base_lr: 5.0e-5
+      warmup_epochs: 1
+      min_lr: 0.0
 
 # No layer_decay: encoders are frozen, LLM is frozen, only resamplers +
 # adapters + LoRA train. A flat LR is fine.
