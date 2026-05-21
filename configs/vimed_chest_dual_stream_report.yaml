@@ -1,0 +1,164 @@
+# Phase B: Dual-stream PET/CT -> English report generator.
+#
+# Architecture (PETRG-3D arXiv:2511.20145 aligned):
+#   1. Frozen Pillar0 CT + Pillar0 PET encoders (loaded from Phase A
+#      export). Token concat fusion module from Phase A is bypassed --
+#      Phase B does fusion at the LLM-prompt level via <ct> / <pet>
+#      special tokens, NOT in the encoder.
+#   2. Two independent Perceiver Resamplers: 128 queries x 1152, 6 layers.
+#   3. Two independent vision -> LLM projection MLPs.
+#   4. Frozen LLM (MedGemma 1.5 4B-IT by default) + LoRA r=8 alpha=32.
+#
+# Trained on Gemma-4-translated English reports; generates English. The
+# original Vietnamese reports are documented in the dataset, but the LLM
+# loss is computed over English tokens. See the methods section.
+#
+# REQUIRED BEFORE LAUNCHING:
+#   1. Phase A exported encoder at
+#      ./logs/dual-stream-pillar/fusion/dual_stream_encoder.pt
+#      (see scripts/export_dual_stream_encoder.py)
+#   2. HuggingFace access for the chosen LLM. For MedGemma you must accept
+#      the Health AI Developer Foundations terms once at
+#      huggingface.co/google/medgemma-1.5-4b-it.
+#   3. peft + sacrebleu + rouge-score installed (pyproject.toml lists them).
+
+experiment:
+  name: dual-stream-pillar-report
+  tags: ["pillar0", "chest", "petct", "report-generation", "medgemma"]
+  notes: "Phase B: dual-stream PET/CT encoders -> LLM report decoder (MedGemma + LoRA)."
+
+main:
+  exp_name: dual-stream-pillar-report
+  seed: 42
+  log_dir: ./logs
+  checkpoints_dir: ./logs/dual-stream-pillar/report
+  timestamp_save_dir: False
+
+  disable_wandb: False
+  wandb_offline: False
+  wandb_project: dual-stream-pillar
+  wandb_entity: thainamhoang
+
+  ckpt_freq: 1
+  monitor: val/bleu_4
+
+  allow_overwriting_experiment_checkpoints: True
+  find_unused_parameters: True
+  force_loading_train_dataloader: False
+
+  phases:
+    train: True
+    dev: True
+    test: False
+
+engine:
+  type: ReportGenerator
+  max_epochs: 30
+  kwargs:
+    resume: null
+    accumulate_grad_batches: 16     # effective batch 16 on single H200 with bs=1
+    precision: bf16-mixed
+    log_interval: 25
+    limit_num_batches: null
+    eval_generate_n_batches: 2      # generate on first 2 val batches per epoch
+    eval_generate_max_new_tokens: 1024
+    eval_generate_top_p: 0.9
+    eval_generate_temperature: 0.7
+    eval_generate_repetition_penalty: 1.05
+    log_loss_components: False
+    use_gpu_augs: False
+    train_gpu_augs: []
+    test_gpu_augs: []
+
+dataloader:
+  batch_size: 1
+  eval_batch_size: 1
+  num_workers: 8
+  class_bal: False
+  train_drop_last: False
+  val_drop_last: False
+  multi_gpu_eval: False
+  persistent_workers: False         # tokenizers in workers can be RAM-heavy
+  prefetch_factor: 2
+  pin_memory: True
+  clip_grad: 1.0                    # LoRA training likes a moderate clip
+  no_shuffle_training_set: False
+  use_null_collate: False
+  frac_train_samples: 1.0
+  no_cache_misses_allowed: False
+
+dataset:
+  type: ViMedChestReportDataset
+
+  shared_dataset_kwargs:
+    csv_path: /scratch/thahoa/PET/ViMed_prep_v2/manifest_splits.csv
+    region: chest
+    # ---- Phase B tokenization ----
+    llm_repo_id: google/medgemma-1.5-4b-it
+    num_ct_queries: 128
+    num_pet_queries: 128
+    max_report_tokens: 512
+    require_report: True
+
+model:
+  type: DualStreamReportGenerator
+  kwargs:
+    # ---- Encoders (frozen) ----
+    encoder_ckpt: ./logs/dual-stream-pillar/fusion/dual_stream_encoder.pt
+    ct_channels: 11
+    pet_channels: 4
+    anatomy: chest_ct
+    model_repo_id: YalaLab/Pillar0-ChestCT
+    model_revision: main
+    freeze_encoders: True
+    token_dim: 1152
+    # ---- Resamplers + projections ----
+    num_ct_queries: 128
+    num_pet_queries: 128
+    resampler_depth: 6
+    resampler_num_heads: 8
+    resampler_ffn_mult: 4
+    resampler_dropout: 0.0
+    projection_dropout: 0.0
+    # ---- LLM + LoRA ----
+    llm_repo_id: google/medgemma-1.5-4b-it
+    llm_torch_dtype: bfloat16
+    apply_lora: True
+    freeze_lm: True
+    lora_r: 8
+    lora_alpha: 32
+    lora_dropout: 0.1
+    # MedGemma uses standard q/k/v/o_proj names (Gemma family). For Qwen
+    # change to ["q_proj", "k_proj", "v_proj", "o_proj"] (same) -- but
+    # confirm via `model.named_modules()` before training.
+    lora_target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+
+optimizer:
+  type: AdamW
+  kwargs:
+    lr: 5.0e-5                       # paper default
+    weight_decay: 0.01
+
+  scheduler:
+    interval: epoch
+    frequency: 1
+    type: ConstantWarmup             # 100-step warmup, constant after (paper)
+    kwargs:
+      warmup_steps: 100
+      base_lr: 5.0e-5
+
+# No layer_decay: encoders are frozen, LLM is frozen, only resamplers +
+# adapters + LoRA train. A flat LR is fine.
+
+metrics:
+  epoch_metrics:
+    train: []
+    val: []
+    test: []
+  # ReportGenerator engine computes LM loss directly from the model
+  # output; no external loss function configured.
+  losses: null
