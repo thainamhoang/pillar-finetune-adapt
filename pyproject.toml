@@ -82,13 +82,9 @@ dependencies = [
     "datadings>=3.4.7",
     "rad-vision-engine",
     "hatchling>=1.27.0",
-    "flash-attn==2.8.3",
 ]
 
 [project.optional-dependencies]
-flash = [
-    "flash-attn>=2.8.3",  # Requires CUDA 12.1+
-]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov",
