@@ -55,6 +55,8 @@ PROJECT_ROOT=/home/thahoa/PET/Pillar-0/pillar-finetune-adapt
 cd "$PROJECT_ROOT"
 mkdir -p "$PROJECT_ROOT/logs/slurm"
 
+[[ -f "$PROJECT_ROOT/.env" ]] && set -a && source "$PROJECT_ROOT/.env" && set +a
+
 export OMP_NUM_THREADS=2
 export PYTHONUNBUFFERED=1
 export NCCL_SOCKET_FAMILY=AF_INET
