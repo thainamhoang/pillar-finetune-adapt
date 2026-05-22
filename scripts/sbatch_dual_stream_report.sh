@@ -6,7 +6,11 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=192G
-#SBATCH --gpus=H200:4
+# Per-GPU peak ~55 GB at bs=4 (45 GB activations + 10 GB eval KV cache),
+# under H100's 80 GB ceiling. H200 only needed if pushing bs to 8 per
+# GPU; with 2206 train samples eff=32 is the sweet spot and bs=4 is
+# enough to hit it on 4 GPUs with grad_accum=2.
+#SBATCH --gpus=H100:4
 
 # Phase B: Dual-stream PET/CT -> LLM report generator.
 #

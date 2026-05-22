@@ -56,11 +56,20 @@ engine:
   max_epochs: 30
   kwargs:
     resume: null
-    # Distributed scale: 4x H200 with bs=4 per GPU -> effective batch 16
-    # (matches the PETRG-3D paper). No grad accumulation needed; DDP
-    # carries the multiplier. For single-GPU runs override via:
-    #   --opts dataloader.batch_size 1 engine.kwargs.accumulate_grad_batches 16
-    accumulate_grad_batches: 1
+    # Distributed scale: 4x H100 with bs=4 per GPU * grad_accum=2 ->
+    # effective batch 32. Sized for the ViMED chest train set (2206
+    # samples), which gives 69 steps/epoch * 30 epochs = 2070 total
+    # optimizer updates -- ~1.7x the PETRG-3D paper's 1240 updates on
+    # the smaller PETRG-Lym set (660 train at eff=16). Healthy headroom
+    # for Adam without saturating the data variety.
+    #
+    # Pushing further (eff=64 via accum=4) drops total updates to 1035
+    # -- below the paper. Below ~500 updates AdamW's second-moment
+    # buffer hasn't settled and LoRA stalls. Don't go there.
+    #
+    # For single-GPU debug runs: --opts dataloader.batch_size 1
+    #   engine.kwargs.accumulate_grad_batches 32
+    accumulate_grad_batches: 2
     precision: bf16-mixed
     log_interval: 25
     limit_num_batches: null
@@ -75,12 +84,14 @@ engine:
     test_gpu_augs: []
 
 dataloader:
-  # Per-GPU batch size. At bs=4 on H200 (141 GB) we sit at ~48 GB peak,
-  # comfortable margin. Empirical floor measured: bs=1 -> 21 GB; static
-  # ~12 GB + ~9 GB/sample activation. bs=8 (~84 GB) is the next stop if
-  # we want effective batch 32.
+  # Per-GPU batch size. Empirical floor measured: bs=1 -> 21 GB; static
+  # ~12 GB + ~8 GB/sample activation. At bs=4 we sit at ~45 GB peak +
+  # ~10 GB for eval-time KV cache = ~55 GB. H100 (80 GB) is the right
+  # card: 25 GB headroom, no need for H200's 141 GB.
+  # bs=8 (~85 GB peak) would push to H200 territory; see header comment
+  # in engine block for why eff=64 isn't worth it on 2206 train samples.
   batch_size: 4
-  eval_batch_size: 4
+  eval_batch_size: 2                # generation's KV cache scales with bs; smaller is safer
   # 24 cpus-per-task / 4 ranks = 6 cpus per rank. 4 workers per rank
   # leaves headroom for the main+tokenizer threads.
   num_workers: 4
