@@ -25,6 +25,26 @@ def concat_all_gather(tensor):
     return output
 
 
+def broadcast_object(obj, src: int = 0):
+    """Broadcast a pickle-able Python object from ``src`` rank to all ranks.
+
+    Returns the same object on every rank after the call. Useful for
+    sharing rank-0-only state across the world without re-deriving it
+    everywhere -- e.g. broadcasting the tokenizer's special-token IDs
+    after ``add_special_tokens`` resized the vocab, or sharing a sampled
+    val subset to generate on, or passing a config decision rank-0 made.
+
+    Falls through to identity on single-process runs.
+    """
+    if not (dist.is_available() and dist.is_initialized()):
+        return obj
+    # broadcast_object_list mutates in-place; only the src rank's element
+    # is actually read at broadcast time, the others are placeholders.
+    payload = [obj]
+    dist.broadcast_object_list(payload, src=src)
+    return payload[0]
+
+
 def _gather_object_concat(obj):
     """Gather arbitrary python objects across ranks and concatenate lists.
     If obj is a list/tuple, returns a single flat list.

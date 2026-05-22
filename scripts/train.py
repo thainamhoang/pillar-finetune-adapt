@@ -76,16 +76,77 @@ def set_seed(seed):
     logger.info(f"Random seed set to {seed}")
 
 
+def _world_info_from_env():
+    """Resolve (local_rank, global_rank, world_size, source) from env vars.
+
+    Tries, in order:
+      * torchrun / torch.distributed.launch -- ``LOCAL_RANK`` / ``RANK`` /
+        ``WORLD_SIZE``
+      * SLURM ``srun`` -- ``SLURM_LOCALID`` / ``SLURM_PROCID`` /
+        ``SLURM_NTASKS``
+      * Single-process fallback -- ``(0, 0, 1, "single")``
+
+    The ``source`` string is informational; useful for logging "which
+    launcher are we under" without having to grep env yourself.
+
+    Mirrors the resolution in pillar-pretrain/distributed.py
+    ``world_info_from_env()`` minus the MPI variants we don't use.
+    """
+    # torchrun path (also covers torch.distributed.launch).
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ and "LOCAL_RANK" in os.environ:
+        return (
+            int(os.environ["LOCAL_RANK"]),
+            int(os.environ["RANK"]),
+            int(os.environ["WORLD_SIZE"]),
+            "torchrun",
+        )
+    # SLURM srun path. SLURM_NTASKS > 1 implies multi-process srun launch.
+    if "SLURM_PROCID" in os.environ and int(os.environ.get("SLURM_NTASKS", "1")) > 1:
+        local_rank = int(os.environ.get("SLURM_LOCALID", "0"))
+        global_rank = int(os.environ["SLURM_PROCID"])
+        world_size = int(os.environ["SLURM_NTASKS"])
+        return local_rank, global_rank, world_size, "slurm"
+    # Fallback: single-process.
+    return 0, 0, 1, "single"
+
+
 def setup_distributed():
-    """Initialize distributed training environment."""
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ["LOCAL_RANK"])
-    else:
+    """Initialize distributed training environment.
+
+    Supports two launcher styles:
+
+    * **torchrun** (default in our sbatch wrappers): ``--ntasks=1`` in
+      SLURM, then ``torchrun --nproc_per_node=N`` spawns N python procs
+      and sets ``RANK`` / ``WORLD_SIZE`` / ``LOCAL_RANK``.
+    * **srun-native**: ``--ntasks=N --gpus-per-task=1`` in SLURM, then
+      ``srun python train.py``. SLURM sets ``SLURM_PROCID`` /
+      ``SLURM_NTASKS`` / ``SLURM_LOCALID`` directly, no torchrun layer.
+
+    Either way returns ``(is_distributed, rank, world_size, local_rank)``.
+    """
+    local_rank, rank, world_size, source = _world_info_from_env()
+
+    if world_size <= 1:
         logger.info("Not using distributed mode")
         setup_for_distributed(True)
         return False, 0, 1, 0
+
+    # When launched via SLURM srun, torch.distributed.init_process_group
+    # with init_method="env://" expects RANK / WORLD_SIZE / LOCAL_RANK to
+    # be present. Inject them from SLURM vars so downstream code (HF
+    # Accelerate, torch DDP internals) finds the expected names.
+    if source == "slurm":
+        os.environ.setdefault("RANK", str(rank))
+        os.environ.setdefault("WORLD_SIZE", str(world_size))
+        os.environ.setdefault("LOCAL_RANK", str(local_rank))
+        # MASTER_ADDR / MASTER_PORT must be set by the sbatch wrapper for
+        # srun-native launches (torchrun sets them automatically).
+        if "MASTER_ADDR" not in os.environ or "MASTER_PORT" not in os.environ:
+            logger.warning(
+                "SLURM srun-style launch detected but MASTER_ADDR/MASTER_PORT "
+                "are not set. init_process_group(env://) will likely fail. "
+                "Set them in your sbatch wrapper before calling train.py."
+            )
 
     torch.cuda.set_device(local_rank)
     dist.init_process_group(
@@ -99,7 +160,10 @@ def setup_distributed():
     is_master = rank == 0
     setup_for_distributed(is_master)
 
-    logger.info(f"Distributed training: rank={rank}, world_size={world_size}, local_rank={local_rank}")
+    logger.info(
+        f"Distributed training [{source}]: "
+        f"rank={rank}, world_size={world_size}, local_rank={local_rank}"
+    )
 
     return True, rank, world_size, local_rank
 
