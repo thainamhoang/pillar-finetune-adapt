@@ -5,7 +5,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=192G
+#SBATCH --mem=128G
 # Per-GPU peak ~55 GB at bs=4 (45 GB activations + 10 GB eval KV cache),
 # under H100's 80 GB ceiling. H200 only needed if pushing bs to 8 per
 # GPU; with 2206 train samples eff=32 is the sweet spot and bs=4 is
@@ -41,7 +41,7 @@
 
 set -euo pipefail
 
-module load miniforge3 cuda h200 dev2025a cmake
+module load miniforge3 cuda h100 dev2025a cmake
 
 export CUDA_HOME=$(dirname $(dirname $(which nvcc)))
 export PATH="$CUDA_HOME/bin:$PATH"
