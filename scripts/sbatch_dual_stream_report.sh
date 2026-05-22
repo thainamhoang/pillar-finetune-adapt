@@ -5,8 +5,8 @@
 #SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=128G
-#SBATCH --gpus=H200:1
+#SBATCH --mem=192G
+#SBATCH --gpus=H200:4
 
 # Phase B: Dual-stream PET/CT -> LLM report generator.
 #

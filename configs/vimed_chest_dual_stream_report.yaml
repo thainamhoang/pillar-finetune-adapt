@@ -56,7 +56,11 @@ engine:
   max_epochs: 30
   kwargs:
     resume: null
-    accumulate_grad_batches: 16     # effective batch 16 on single H200 with bs=1
+    # Distributed scale: 4x H200 with bs=4 per GPU -> effective batch 16
+    # (matches the PETRG-3D paper). No grad accumulation needed; DDP
+    # carries the multiplier. For single-GPU runs override via:
+    #   --opts dataloader.batch_size 1 engine.kwargs.accumulate_grad_batches 16
+    accumulate_grad_batches: 1
     precision: bf16-mixed
     log_interval: 25
     limit_num_batches: null
@@ -71,14 +75,27 @@ engine:
     test_gpu_augs: []
 
 dataloader:
-  batch_size: 1
-  eval_batch_size: 1
-  num_workers: 8
+  # Per-GPU batch size. At bs=4 on H200 (141 GB) we sit at ~48 GB peak,
+  # comfortable margin. Empirical floor measured: bs=1 -> 21 GB; static
+  # ~12 GB + ~9 GB/sample activation. bs=8 (~84 GB) is the next stop if
+  # we want effective batch 32.
+  batch_size: 4
+  eval_batch_size: 4
+  # 24 cpus-per-task / 4 ranks = 6 cpus per rank. 4 workers per rank
+  # leaves headroom for the main+tokenizer threads.
+  num_workers: 4
   class_bal: False
-  train_drop_last: False
+  # DDP needs even shards across ranks; dropping the last partial batch
+  # avoids the uneven-last-batch edge case. ~600 train / 16 eff = 37 full
+  # batches per epoch + 8 dropped samples (1.3% loss, acceptable).
+  train_drop_last: True
   val_drop_last: False
+  # Eval runs on each rank with the same (non-distributed) sampler so the
+  # master rank can compute global NLG metrics without cross-rank gather.
+  # 4x redundant eval work is the cost (~30s/epoch). Promote to True only
+  # after we add gather_predictions_dict for the NLG accumulators.
   multi_gpu_eval: False
-  persistent_workers: False         # tokenizers in workers can be RAM-heavy
+  persistent_workers: True          # 4 workers x 4 ranks = 16 procs, ~16 GB held
   prefetch_factor: 2
   pin_memory: True
   clip_grad: 1.0                    # LoRA training likes a moderate clip
