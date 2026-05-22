@@ -56,7 +56,20 @@ engine:
   max_epochs: 30
   kwargs:
     resume: null
-    accumulate_grad_batches: 16     # effective batch 16 on single H200 with bs=1
+    # Distributed scale: 4x H100 with bs=4 per GPU * grad_accum=2 ->
+    # effective batch 32. Sized for the ViMED chest train set (2206
+    # samples), which gives 69 steps/epoch * 30 epochs = 2070 total
+    # optimizer updates -- ~1.7x the PETRG-3D paper's 1240 updates on
+    # the smaller PETRG-Lym set (660 train at eff=16). Healthy headroom
+    # for Adam without saturating the data variety.
+    #
+    # Pushing further (eff=64 via accum=4) drops total updates to 1035
+    # -- below the paper. Below ~500 updates AdamW's second-moment
+    # buffer hasn't settled and LoRA stalls. Don't go there.
+    #
+    # For single-GPU debug runs: --opts dataloader.batch_size 1
+    #   engine.kwargs.accumulate_grad_batches 32
+    accumulate_grad_batches: 2
     precision: bf16-mixed
     log_interval: 25
     limit_num_batches: null
@@ -71,14 +84,29 @@ engine:
     test_gpu_augs: []
 
 dataloader:
-  batch_size: 1
-  eval_batch_size: 1
-  num_workers: 8
+  # Per-GPU batch size. Empirical floor measured: bs=1 -> 21 GB; static
+  # ~12 GB + ~8 GB/sample activation. At bs=4 we sit at ~45 GB peak +
+  # ~10 GB for eval-time KV cache = ~55 GB. H100 (80 GB) is the right
+  # card: 25 GB headroom, no need for H200's 141 GB.
+  # bs=8 (~85 GB peak) would push to H200 territory; see header comment
+  # in engine block for why eff=64 isn't worth it on 2206 train samples.
+  batch_size: 4
+  eval_batch_size: 2                # generation's KV cache scales with bs; smaller is safer
+  # 24 cpus-per-task / 4 ranks = 6 cpus per rank. 4 workers per rank
+  # leaves headroom for the main+tokenizer threads.
+  num_workers: 4
   class_bal: False
-  train_drop_last: False
+  # DDP needs even shards across ranks; dropping the last partial batch
+  # avoids the uneven-last-batch edge case. ~600 train / 16 eff = 37 full
+  # batches per epoch + 8 dropped samples (1.3% loss, acceptable).
+  train_drop_last: True
   val_drop_last: False
+  # Eval runs on each rank with the same (non-distributed) sampler so the
+  # master rank can compute global NLG metrics without cross-rank gather.
+  # 4x redundant eval work is the cost (~30s/epoch). Promote to True only
+  # after we add gather_predictions_dict for the NLG accumulators.
   multi_gpu_eval: False
-  persistent_workers: False         # tokenizers in workers can be RAM-heavy
+  persistent_workers: True          # 4 workers x 4 ranks = 16 procs, ~16 GB held
   prefetch_factor: 2
   pin_memory: True
   clip_grad: 1.0                    # LoRA training likes a moderate clip
