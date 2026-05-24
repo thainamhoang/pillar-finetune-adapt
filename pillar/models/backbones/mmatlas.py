@@ -20,15 +20,34 @@ def ensure_transformers_tied_weight_compat() -> None:
     """
     Bridge minor API drift in Transformers tied-weight loading.
 
-    Some custom remote-code models still expose `_tied_weights_keys` in the
-    older format, while newer Transformers loader paths look for
-    `all_tied_weights_keys`.
+    Some custom remote-code models (e.g. the Pillar0-ChestCT remote code)
+    still expose ``_tied_weights_keys`` in the older format, while newer
+    Transformers loader paths look for ``all_tied_weights_keys``. The
+    shim materializes ``all_tied_weights_keys`` on ``PreTrainedModel`` so
+    old custom code becomes loadable.
+
+    Compatibility wrinkle: in transformers >= ~4.56, ``PreTrainedModel``
+    itself doesn't expose ``all_tied_weights_keys`` on the *class* but
+    its ``post_init`` *writes* to ``self.all_tied_weights_keys`` (as an
+    instance attribute, e.g. when constructing ``SiglipVisionModel``).
+    A read-only ``@property`` shim makes that write fail with
+    ``AttributeError: property of '...' object has no setter``.
+
+    To support both API generations simultaneously, install the shim as
+    a property *with* a setter that just stashes onto a private instance
+    slot. Subsequent reads from old-style code path through the slot if
+    set, else fall back to ``_tied_weights_keys``.
     """
     if hasattr(PreTrainedModel, "all_tied_weights_keys"):
         return
 
-    @property
-    def all_tied_weights_keys(self):
+    _SLOT = "_pillar_all_tied_weights_keys"
+
+    def _get(self):
+        # Honor anything transformers' post_init wrote to us.
+        cached = getattr(self, _SLOT, None)
+        if cached is not None:
+            return cached
         tied = getattr(self, "_tied_weights_keys", {}) or {}
         if isinstance(tied, dict):
             return tied
@@ -36,7 +55,13 @@ def ensure_transformers_tied_weight_compat() -> None:
             return {key: key for key in tied}
         return {}
 
-    PreTrainedModel.all_tied_weights_keys = all_tied_weights_keys
+    def _set(self, value):
+        # Use object.__setattr__ to avoid recursing into nn.Module.__setattr__'s
+        # parameter / buffer / submodule routing (the value is a plain dict,
+        # not a torch object).
+        object.__setattr__(self, _SLOT, value)
+
+    PreTrainedModel.all_tied_weights_keys = property(_get, _set)
 
 
 def setup_device(device_spec: str | None = None) -> torch.device:
