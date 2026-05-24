@@ -80,7 +80,7 @@ torchrun \
   "$PROJECT_ROOT/scripts/train.py" "$CONFIG_FILE" \
     --opts dataloader.num_workers 12 \
            dataloader.batch_size 4 \
-           engine.kwargs.accumulate_grad_batches 16
+           engine.kwargs.accumulate_grad_batches 8
 TORCHRUN_EXIT=$?
 
 exit $TORCHRUN_EXIT
