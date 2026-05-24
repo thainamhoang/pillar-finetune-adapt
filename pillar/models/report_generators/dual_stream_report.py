@@ -334,6 +334,31 @@ class DualStreamReportGenerator(AbstractModel):
         # padding scheme.
         labels[:, Lp:][report_attention_mask == 0] = -100
 
+        # Strengthen the EOR (end-of-report) supervision. As-is, only ONE
+        # EOR target exists per sample (the single EOR token at the end of
+        # report_token_ids). That's <1% of the loss signal, drowning out
+        # the gradient that should teach the model to terminate. PETRG-3D
+        # §D.5 names "explicit end-of-report token" as the single most
+        # impactful fix for runaway generation. To make it stick:
+        #
+        # For each batch row, find the first EOR position and overwrite all
+        # subsequent labels in the report span (currently -100 due to
+        # padding) with the EOR token id. The input_ids stay padded
+        # (attention_mask=0 there, so they don't enter attention), but the
+        # model is now supervised to keep emitting EOR after content -- a
+        # strong attractor for "once you finish, stop."
+        eor_id = self.eor_id
+        report_labels = labels[:, Lp:]  # view into labels (shape: B, Lr)
+        for b in range(B):
+            eor_positions = (report_token_ids[b] == eor_id).nonzero(as_tuple=True)[0]
+            if eor_positions.numel() == 0:
+                # Sample's report didn't fit -- EOR was truncated. Nothing
+                # to anchor on, leave labels alone.
+                continue
+            first_eor = int(eor_positions[0].item())
+            # Supervise EOR at every position from first_eor onward.
+            report_labels[b, first_eor:] = eor_id
+
         return input_embeds, attn_mask, labels
 
     # ------------------------------------------------------------------
@@ -389,6 +414,7 @@ class DualStreamReportGenerator(AbstractModel):
         top_p: float = 0.9,
         temperature: float = 0.7,
         repetition_penalty: float = 1.05,
+        no_repeat_ngram_size: int = 0,
         do_sample: bool = True,
     ) -> list[str]:
         """Generate a report for each sample in ``batch``.
@@ -410,6 +436,7 @@ class DualStreamReportGenerator(AbstractModel):
             top_p=top_p,
             temperature=temperature,
             repetition_penalty=repetition_penalty,
+            no_repeat_ngram_size=no_repeat_ngram_size,
             do_sample=do_sample,
         )
         texts = []

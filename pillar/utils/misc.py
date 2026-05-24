@@ -55,6 +55,25 @@ def get_is_master():
     return is_master
 
 
+def is_local_master():
+    """True if this process is the local (per-node) rank-zero process.
+
+    Reads ``LOCAL_RANK`` from env directly so it works even before
+    ``setup_for_distributed`` has been called. Useful for "do this once
+    per node" patterns -- e.g. downloading a HF model into a node-local
+    cache, creating a per-node tmp dir, etc. Distinct from
+    ``get_is_master()`` which is the *global* rank-zero process.
+    """
+    # torchrun / torch.distributed.launch set LOCAL_RANK.
+    # SLURM srun sets SLURM_LOCALID.
+    # If neither is present we're single-process -- always local master.
+    if "LOCAL_RANK" in os.environ:
+        return int(os.environ["LOCAL_RANK"]) == 0
+    if "SLURM_LOCALID" in os.environ:
+        return int(os.environ["SLURM_LOCALID"]) == 0
+    return True
+
+
 @rank_zero_only
 def setup_dirs(main_args, is_master=False):
     if not is_master:

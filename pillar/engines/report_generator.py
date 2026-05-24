@@ -106,6 +106,7 @@ class ReportGenerator(Engine):
         eval_generate_top_p: float = 0.9,
         eval_generate_temperature: float = 0.7,
         eval_generate_repetition_penalty: float = 1.05,
+        eval_generate_no_repeat_ngram_size: int = 0,
         log_loss_components: bool = False,
         **kwargs,
     ) -> None:
@@ -116,6 +117,7 @@ class ReportGenerator(Engine):
         self.eval_generate_top_p = eval_generate_top_p
         self.eval_generate_temperature = eval_generate_temperature
         self.eval_generate_repetition_penalty = eval_generate_repetition_penalty
+        self.eval_generate_no_repeat_ngram_size = eval_generate_no_repeat_ngram_size
         self.log_loss_components = log_loss_components
 
         # Per-epoch accumulator for generated text -- consumed at on_epoch_end.
@@ -340,6 +342,7 @@ class ReportGenerator(Engine):
                             top_p=self.eval_generate_top_p,
                             temperature=self.eval_generate_temperature,
                             repetition_penalty=self.eval_generate_repetition_penalty,
+                            no_repeat_ngram_size=self.eval_generate_no_repeat_ngram_size,
                         )
                 except Exception as e:
                     logger.warning(f"generate() raised on batch {batch_idx}: {e}")

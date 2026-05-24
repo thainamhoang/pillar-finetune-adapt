@@ -126,7 +126,11 @@ def check_tokenizer(llm_repo_id: str, num_ct: int, num_pet: int) -> bool:
     try:
         from transformers import AutoTokenizer
         from pillar.models.heads.report_lm import SPECIAL_TOKENS
-        from pillar.datasets.vimed_chest_report import DEFAULT_CHEST_PROMPT_TEMPLATE
+        from pillar.datasets.vimed_chest_report import (
+            DEFAULT_CHEST_PROMPT_TEMPLATE,
+            DEFAULT_CHEST_PROMPT_TEMPLATE_SAMF,
+            CHEST_HEALTHY_TEMPLATES,
+        )
     except Exception as e:
         failed("tokenizer", f"import failed: {e}")
         return False
@@ -145,21 +149,57 @@ def check_tokenizer(llm_repo_id: str, num_ct: int, num_pet: int) -> bool:
 
     ct_pad = SPECIAL_TOKENS["ct_pad"]
     pet_pad = SPECIAL_TOKENS["pet_pad"]
-    rendered = DEFAULT_CHEST_PROMPT_TEMPLATE.format(
+
+    def _check(label: str, rendered: str) -> bool:
+        enc = tok(rendered, add_special_tokens=False, return_tensors="pt")
+        ids = enc["input_ids"][0]
+        n_ct_tok = int((ids == tok.convert_tokens_to_ids(ct_pad)).sum().item())
+        n_pet_tok = int((ids == tok.convert_tokens_to_ids(pet_pad)).sum().item())
+        info(f"tokenizer[{label}]",
+             f"len={len(ids)} #ct_pad={n_ct_tok} #pet_pad={n_pet_tok}")
+        if n_ct_tok != num_ct or n_pet_tok != num_pet:
+            failed(f"tokenizer[{label}]",
+                   f"placeholder count mismatch: ct={n_ct_tok}/{num_ct}, "
+                   f"pet={n_pet_tok}/{num_pet}")
+            return False
+        passed(f"tokenizer[{label}]", "placeholder counts match")
+        return True
+
+    # Non-SAMF baseline.
+    rendered_base = DEFAULT_CHEST_PROMPT_TEMPLATE.format(
         ct_pads=ct_pad * num_ct, pet_pads=pet_pad * num_pet
     )
-    enc = tok(rendered, add_special_tokens=False, return_tensors="pt")
-    ids = enc["input_ids"][0]
-    n_ct_tok = int((ids == tok.convert_tokens_to_ids(ct_pad)).sum().item())
-    n_pet_tok = int((ids == tok.convert_tokens_to_ids(pet_pad)).sum().item())
-    info("tokenizer", f"prompt token length = {len(ids)}; "
-                      f"#ct_pad={n_ct_tok}, #pet_pad={n_pet_tok}")
-    if n_ct_tok != num_ct or n_pet_tok != num_pet:
-        failed("tokenizer",
-               f"placeholder count mismatch: ct={n_ct_tok}/{num_ct}, pet={n_pet_tok}/{num_pet}")
-        return False
-    passed("tokenizer", "prompt template tokenizes to the right placeholder counts")
-    return True
+    base_ok = _check("baseline", rendered_base)
+
+    # SAMF, both genders. Template tokens should appear in the rendered
+    # form; check that <template> / </template> got tokenized as single
+    # special tokens.
+    samf_ok = True
+    template_open_id = tok.convert_tokens_to_ids(SPECIAL_TOKENS["template_open"])
+    template_close_id = tok.convert_tokens_to_ids(SPECIAL_TOKENS["template_close"])
+    for gender_key in ("male", "female"):
+        rendered = DEFAULT_CHEST_PROMPT_TEMPLATE_SAMF.format(
+            ct_pads=ct_pad * num_ct,
+            pet_pads=pet_pad * num_pet,
+            healthy_template=CHEST_HEALTHY_TEMPLATES[gender_key],
+            gender_human=gender_key,
+        )
+        if not _check(f"samf:{gender_key}", rendered):
+            samf_ok = False
+            continue
+        enc = tok(rendered, add_special_tokens=False, return_tensors="pt")
+        ids = enc["input_ids"][0]
+        n_open = int((ids == template_open_id).sum().item())
+        n_close = int((ids == template_close_id).sum().item())
+        if n_open != 1 or n_close != 1:
+            failed(f"tokenizer[samf:{gender_key}]",
+                   f"<template>/<template/> counts wrong: open={n_open}, close={n_close}")
+            samf_ok = False
+        else:
+            passed(f"tokenizer[samf:{gender_key}]",
+                   "<template>...</template> wraps the healthy reference")
+
+    return base_ok and samf_ok
 
 
 # ----- 4. Dataset with tokenizer wired -----
@@ -182,11 +222,32 @@ def check_dataset(manifest: Path, llm_repo_id: str, num_ct: int, num_pet: int) -
             num_pet_queries=num_pet,
             max_report_tokens=512,
             require_report=False,  # don't depend on report-text in this sanity check
+            use_samf=True,
         )
     except Exception as e:
         failed("dataset", f"instantiation failed: {e}")
         traceback.print_exc()
         return None
+
+    # SAMF wiring: dataset must hold both male and female prompt variants.
+    variants = getattr(ds, "_prompt_variants", None)
+    if not isinstance(variants, dict) or set(variants.keys()) != {"male", "female"}:
+        failed("dataset[samf]",
+               f"_prompt_variants keys = {set(variants.keys()) if variants else None}, "
+               "expected {'male', 'female'}")
+    else:
+        # The two variants should differ -- different gender_human + healthy
+        # template body. Check by comparing token-id tensors length OR content.
+        m_ids = variants["male"]["ids"]
+        f_ids = variants["female"]["ids"]
+        if torch.equal(m_ids, f_ids):
+            failed("dataset[samf]",
+                   "male and female prompt variants are byte-identical "
+                   "(template substitution may not be wired)")
+        else:
+            passed("dataset[samf]",
+                   f"male prompt len={len(m_ids)}, female prompt len={len(f_ids)} "
+                   "(distinct as expected)")
 
     if len(ds) == 0:
         failed("dataset", "empty for split=val region=chest")
@@ -208,12 +269,21 @@ def check_dataset(manifest: Path, llm_repo_id: str, num_ct: int, num_pet: int) -
                           "Phase B training will need require_report=True data")
 
     required = {"ct_windows", "pet_windows", "prompt_token_ids",
-                "prompt_attention_mask", "report_token_ids", "report_attention_mask"}
+                "prompt_attention_mask", "report_token_ids",
+                "report_attention_mask", "gender"}
     missing = required - set(item.keys())
     if missing:
         failed("dataset", f"item missing keys: {missing}")
         return None
     passed("dataset", "item has all Phase B keys")
+
+    # Gender field should be one of the registered keys.
+    gk = item.get("gender")
+    if gk in ("male", "female"):
+        info("dataset", f"gender resolved to {gk!r}")
+        passed("dataset", "gender routing works on real sample")
+    else:
+        failed("dataset", f"unexpected gender value: {gk!r}")
 
     for k in ("ct_windows", "pet_windows", "prompt_token_ids", "report_token_ids"):
         info("dataset", f"{k}: shape={tuple(item[k].shape)} dtype={item[k].dtype}")

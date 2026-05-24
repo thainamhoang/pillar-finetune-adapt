@@ -101,6 +101,8 @@ echo "Using $NUM_GPUS GPU(s): $CUDA_VISIBLE_DEVICES"
 echo "Torch rendezvous: ${MASTER_ADDR}:${MASTER_PORT}"
 
 set +e
+# Default: torchrun launches NUM_GPUS python processes inside a single
+# SLURM task. Works on any cluster.
 torchrun \
   --nnodes=1 \
   --nproc_per_node="$NUM_GPUS" \
@@ -108,5 +110,23 @@ torchrun \
   --master_port="$MASTER_PORT" \
   "$PROJECT_ROOT/scripts/train.py" "$CONFIG_FILE"
 TORCHRUN_EXIT=$?
+
+# --- Alternative: SLURM srun-native launch (DO NOT enable both at once) ---
+#
+# scripts/train.py::_world_info_from_env() also resolves rank from
+# SLURM_PROCID / SLURM_LOCALID / SLURM_NTASKS, so you can drop torchrun
+# entirely and let SLURM spawn one Python process per GPU directly. This
+# is sometimes cleaner on multi-node SLURM clusters because there's one
+# less layer of process supervision. Requires the sbatch header to set
+# --ntasks=$NUM_GPUS instead of --ntasks=1 above.
+#
+# Example replacement:
+#     #SBATCH --ntasks=4
+#     #SBATCH --gpus-per-task=1
+#     srun python "$PROJECT_ROOT/scripts/train.py" "$CONFIG_FILE"
+# TORCHRUN_EXIT=$?
+#
+# Keep MASTER_ADDR / MASTER_PORT exported either way -- both paths use
+# init_method="env://".
 
 exit $TORCHRUN_EXIT
