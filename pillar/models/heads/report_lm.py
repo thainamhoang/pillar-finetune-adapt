@@ -36,13 +36,15 @@ from torch import nn
 
 
 SPECIAL_TOKENS = {
-    "ct_open":   "<ct>",
-    "ct_close":  "</ct>",
-    "pet_open":  "<pet>",
-    "pet_close": "</pet>",
-    "ct_pad":    "<image_ct_pad>",
-    "pet_pad":   "<image_pet_pad>",
-    "eor":       "<|end_of_report|>",
+    "ct_open":       "<ct>",
+    "ct_close":      "</ct>",
+    "pet_open":      "<pet>",
+    "pet_close":     "</pet>",
+    "ct_pad":        "<image_ct_pad>",
+    "pet_pad":       "<image_pet_pad>",
+    "template_open":  "<template>",
+    "template_close": "</template>",
+    "eor":           "<|end_of_report|>",
 }
 
 

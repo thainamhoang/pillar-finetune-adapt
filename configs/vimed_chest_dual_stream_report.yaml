@@ -135,6 +135,25 @@ dataset:
     num_pet_queries: 128
     max_report_tokens: 512
     require_report: True
+    # ---- SAMF (Style-Adaptive Multimodal Fusion, PETRG-3D §4.2) ----
+    # Inject a gender-matched "healthy chest PET/CT" reference inside
+    # <template>...</template> right after the visual tokens. Per
+    # PETRG-3D Fig. 4 this is their single largest NLG-improving
+    # component (+5.4 BLEU-4 / +5.95 ROUGE-L over DSFE-only). The
+    # mechanism is style offloading: the LM gets report STYLE handed
+    # to it as scaffolding, freeing its capacity to learn the
+    # image -> deviation mapping.
+    #
+    # Single-center adaptation: PETRG-3D uses (Center_ID, Gender) keys
+    # because they're multi-hospital; ViMED is single-center so only
+    # gender matters here. Templates default to the bootstrap drafts in
+    # pillar/datasets/vimed_chest_report.py CHEST_HEALTHY_TEMPLATES.
+    # Override `healthy_templates` here if you get clinician-curated
+    # versions later.
+    #
+    # Set use_samf=False for the ablation run that matches our previous
+    # plateaued epoch-10 config.
+    use_samf: True
 
 model:
   type: DualStreamReportGenerator

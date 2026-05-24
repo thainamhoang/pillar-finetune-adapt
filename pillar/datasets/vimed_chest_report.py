@@ -25,6 +25,91 @@ DEFAULT_CHEST_PROMPT_TEMPLATE = (
 )
 
 
+# ---- SAMF (Style-Adaptive Multimodal Fusion) prompt + healthy templates ----
+#
+# PETRG-3D §4.2 + §5.2.1 + Fig. 4 show that injecting a "healthy reference
+# report" template as ``<template>...</template>`` in the prompt is the
+# single largest NLG-improving trick in their ablation (+5.4 BLEU-4,
+# +5.95 ROUGE-L over DSFE-only). The mechanism: the LM no longer has to
+# learn report STYLE on top of vision conditioning -- the style is handed
+# to it as scaffolding. Model capacity is freed to focus on what's
+# actually IN the image (deviations from the template).
+#
+# Their setup uses (Center_ID, Gender) keys -- multi-hospital + binary
+# gender. ViMED is single-center so the center dimension collapses; we
+# keep only the gender axis, which still matters for chest reports
+# because breast tissue mentions differ.
+#
+# Authoring approach for these defaults: induced from the patterns
+# observed across ViMED chest reports in the training set. Common
+# baseline phrasing on healthy / unremarkable chest exams:
+#   * Physiological FDG uptake in heart.
+#   * No pleural / pericardial effusion.
+#   * Lungs clear, no abnormal focal FDG uptake.
+#   * Mediastinum / hila unremarkable.
+#   * Esophagus normal.
+#   * No axillary lymphadenopathy.
+#   * Chest wall + pleura unremarkable.
+#   * (Female only) breast tissue fibroglandular, no abnormal uptake.
+#
+# These are starting drafts; clinician sign-off is the natural next step
+# once the SAMF wiring is verified to work mechanically.
+CHEST_HEALTHY_TEMPLATES = {
+    "male": (
+        "Physiological FDG uptake is observed in the heart. "
+        "No pleural effusion or pericardial effusion detected. "
+        "The lung fields are clear with no abnormal focal FDG uptake. "
+        "The mediastinum and hila show no enlarged lymph nodes or "
+        "abnormal FDG metabolism. The esophagus appears normal without "
+        "wall thickening or abnormal FDG uptake. No axillary "
+        "lymphadenopathy is observed in either axillary fossa. "
+        "The chest wall and pleura appear unremarkable."
+    ),
+    "female": (
+        "Physiological FDG uptake is observed in the heart. "
+        "No pleural effusion or pericardial effusion detected. "
+        "The lung fields are clear with no abnormal focal FDG uptake. "
+        "The mediastinum and hila show no enlarged lymph nodes or "
+        "abnormal FDG metabolism. The esophagus appears normal without "
+        "wall thickening or abnormal FDG uptake. No axillary "
+        "lymphadenopathy is observed in either axillary fossa. "
+        "The breast tissue appears fibroglandular with no abnormal masses "
+        "or FDG uptake. The chest wall and pleura appear unremarkable."
+    ),
+}
+
+
+# SAMF-enabled prompt template. Has two extra slots compared to the
+# baseline: ``{healthy_template}`` (the gender-matched reference) and
+# ``{gender_human}`` (a human-readable string for the instruction).
+DEFAULT_CHEST_PROMPT_TEMPLATE_SAMF = (
+    "You are a nuclear medicine physician specializing in chest PET/CT.\n"
+    "The following are paired chest PET/CT images.\n"
+    "<ct>{ct_pads}</ct>\n"
+    "<pet>{pet_pads}</pet>\n"
+    "Reference healthy chest PET/CT findings template ({gender_human} patient):\n"
+    "<template>{healthy_template}</template>\n"
+    'Generate the "Findings" section of the radiology report in English. '
+    "Describe deviations from the reference template above; do not repeat "
+    "it verbatim. Focus on observed pathology with location and size.\n"
+)
+
+
+def _resolve_gender_key(value: Any) -> str:
+    """Map an arbitrary ``gender`` value to ``"male"`` or ``"female"``.
+
+    Falls back to ``"male"`` for missing / unknown values. The male
+    template is also a fine fallback for unisex content -- it's the
+    superset minus the breast-tissue line.
+    """
+    if value is None:
+        return "male"
+    s = str(value).strip().lower()
+    if s.startswith("f") or s in {"nữ", "nu", "woman", "women"}:
+        return "female"
+    return "male"
+
+
 class ViMedChestReportDataset(Dataset):
     """Chest-only ViMED dataset for dual-stream PET/CT report generation.
 
@@ -107,6 +192,9 @@ class ViMedChestReportDataset(Dataset):
         prompt_template: Optional[str] = None,
         max_report_tokens: int = 512,
         require_report: Optional[bool] = None,
+        # ---- SAMF (Style-Adaptive Multimodal Fusion) ----
+        use_samf: bool = True,
+        healthy_templates: Optional[dict[str, str]] = None,
         **kwargs,  # silently accept other YAML knobs we don't use
     ) -> None:
         del args, augmentations, kwargs  # unused by this dataset
@@ -137,6 +225,15 @@ class ViMedChestReportDataset(Dataset):
         self.num_pet_queries = num_pet_queries
         self.max_report_tokens = max_report_tokens
 
+        # SAMF state. healthy_templates is keyed by ``"male"``/``"female"``;
+        # callers can override the defaults via YAML if they want
+        # clinician-curated templates instead of the bootstrap ones above.
+        self.use_samf = bool(use_samf)
+        self.healthy_templates = (
+            dict(healthy_templates) if healthy_templates is not None
+            else dict(CHEST_HEALTHY_TEMPLATES)
+        )
+
         if tokenizer is None and llm_repo_id is not None:
             tokenizer = self._build_tokenizer(llm_repo_id)
         self.tokenizer = tokenizer
@@ -147,9 +244,14 @@ class ViMedChestReportDataset(Dataset):
         self.require_report = require_report
 
         if tokenizer is not None:
-            template = prompt_template if prompt_template is not None else DEFAULT_CHEST_PROMPT_TEMPLATE
+            if prompt_template is not None:
+                template = prompt_template  # user override; takes precedence
+            elif self.use_samf:
+                template = DEFAULT_CHEST_PROMPT_TEMPLATE_SAMF
+            else:
+                template = DEFAULT_CHEST_PROMPT_TEMPLATE
             self.prompt_template = template
-            self._prebuild_prompt_tokens()
+            self._prebuild_prompt_variants()
             # We can't statically filter rows by report presence because
             # report_text may live in the .pt sidecar metadata rather than
             # the CSV. Lazy skip at __getitem__ time -- the project's
@@ -157,8 +259,7 @@ class ViMedChestReportDataset(Dataset):
             # None samples from each batch.
         else:
             self.prompt_template = None
-            self._prompt_token_ids = None
-            self._prompt_attention_mask = None
+            self._prompt_variants = None
 
     # ------------------------------------------------------------------
     # Tokenizer helpers
@@ -178,51 +279,67 @@ class ViMedChestReportDataset(Dataset):
             tok.pad_token = tok.eos_token
         return tok
 
-    def _prebuild_prompt_tokens(self) -> None:
-        """Tokenize the prompt template ONCE (it's identical per sample).
+    def _prebuild_prompt_variants(self) -> None:
+        """Tokenize each prompt variant ONCE and cache it.
 
-        Verifies that the resulting token sequence contains exactly
-        ``num_ct_queries`` ``<image_ct_pad>`` ids and ``num_pet_queries``
-        ``<image_pet_pad>`` ids, so the model's splice step has the
-        positions it expects.
+        Variants:
+          * SAMF enabled: two variants, keyed ``"male"`` and ``"female"``,
+            differing only in the ``<template>...</template>`` body. Per
+            PETRG-3D §4.2, the healthy reference scaffolds the LM so it
+            can focus on findings rather than style.
+          * SAMF disabled: one variant under key ``""`` -- the original
+            non-SAMF behavior.
+
+        In every variant the placeholder counts (128 ``<image_ct_pad>`` +
+        128 ``<image_pet_pad>``) are asserted to match the model's
+        ``num_ct/pet_queries``. This is the integrity contract that
+        ``DualStreamReportGenerator._splice_visual_embeds`` relies on.
         """
         from pillar.models.heads.report_lm import SPECIAL_TOKENS
 
         ct_pad_tok = SPECIAL_TOKENS["ct_pad"]
         pet_pad_tok = SPECIAL_TOKENS["pet_pad"]
-        rendered = self.prompt_template.format(
-            ct_pads=ct_pad_tok * self.num_ct_queries,
-            pet_pads=pet_pad_tok * self.num_pet_queries,
-        )
 
-        enc = self.tokenizer(
-            rendered,
-            add_special_tokens=False,  # we control BOS/EOS placement
-            return_tensors="pt",
-            return_attention_mask=True,
-        )
-        ids = enc["input_ids"][0]
-        mask = enc["attention_mask"][0]
+        if self.use_samf:
+            keys = ("male", "female")
+        else:
+            keys = ("",)
 
-        ct_pad_id = self.tokenizer.convert_tokens_to_ids(ct_pad_tok)
-        pet_pad_id = self.tokenizer.convert_tokens_to_ids(pet_pad_tok)
-        n_ct = int((ids == ct_pad_id).sum().item())
-        n_pet = int((ids == pet_pad_id).sum().item())
-        if n_ct != self.num_ct_queries:
-            raise ValueError(
-                f"Prompt template produced {n_ct} <image_ct_pad> tokens; "
-                f"expected {self.num_ct_queries}. Check that the special "
-                "token was registered on the tokenizer (add_special_tokens)."
+        self._prompt_variants: dict[str, dict[str, torch.Tensor]] = {}
+        for key in keys:
+            fmt_kwargs = dict(
+                ct_pads=ct_pad_tok * self.num_ct_queries,
+                pet_pads=pet_pad_tok * self.num_pet_queries,
             )
-        if n_pet != self.num_pet_queries:
-            raise ValueError(
-                f"Prompt template produced {n_pet} <image_pet_pad> tokens; "
-                f"expected {self.num_pet_queries}."
-            )
+            if self.use_samf:
+                fmt_kwargs["healthy_template"] = self.healthy_templates[key]
+                fmt_kwargs["gender_human"] = key
+            rendered = self.prompt_template.format(**fmt_kwargs)
 
-        # Cache; every sample reuses the same prompt.
-        self._prompt_token_ids = ids
-        self._prompt_attention_mask = mask
+            enc = self.tokenizer(
+                rendered,
+                add_special_tokens=False,
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
+            ids = enc["input_ids"][0]
+            mask = enc["attention_mask"][0]
+
+            ct_pad_id = self.tokenizer.convert_tokens_to_ids(ct_pad_tok)
+            pet_pad_id = self.tokenizer.convert_tokens_to_ids(pet_pad_tok)
+            n_ct = int((ids == ct_pad_id).sum().item())
+            n_pet = int((ids == pet_pad_id).sum().item())
+            if n_ct != self.num_ct_queries:
+                raise ValueError(
+                    f"Prompt variant {key!r} produced {n_ct} <image_ct_pad> tokens; "
+                    f"expected {self.num_ct_queries}."
+                )
+            if n_pet != self.num_pet_queries:
+                raise ValueError(
+                    f"Prompt variant {key!r} produced {n_pet} <image_pet_pad> tokens; "
+                    f"expected {self.num_pet_queries}."
+                )
+            self._prompt_variants[key] = {"ids": ids, "mask": mask}
 
     # ------------------------------------------------------------------
     def __len__(self) -> int:
@@ -241,6 +358,12 @@ class ViMedChestReportDataset(Dataset):
             # sample. Avoids static CSV peek (report may live in .pt sidecar).
             return None
 
+        # Resolve gender from metadata, falling back to the CSV row, then
+        # to "male" if absent. Used by SAMF prompt routing AND exposed on
+        # the output dict for downstream debugging / per-gender ablation.
+        raw_gender = metadata.get("gender") or row.get("gender")
+        gender_key = _resolve_gender_key(raw_gender)
+
         out = {
             "ct_windows": windows["ct_windows"],
             "pet_windows": windows["pet_windows"],
@@ -248,6 +371,7 @@ class ViMedChestReportDataset(Dataset):
             "study_id": row["study_id"],
             "accession": row["study_id"],
             "region": row["region"],
+            "gender": gender_key,
             "metadata": metadata,
         }
         if "labels" in item:
@@ -257,16 +381,30 @@ class ViMedChestReportDataset(Dataset):
             out["x_raw"] = x_raw
 
         if self.tokenizer is not None:
-            self._add_tokenized_fields(out, report_text)
+            self._add_tokenized_fields(out, report_text, gender_key)
         return out
 
-    def _add_tokenized_fields(self, out: dict, report_text: str) -> None:
-        """Populate prompt + report token tensors on ``out``."""
+    def _add_tokenized_fields(
+        self, out: dict, report_text: str, gender_key: str
+    ) -> None:
+        """Populate prompt + report token tensors on ``out``.
+
+        With SAMF on, picks the male/female prompt variant based on
+        ``gender_key``. Without SAMF, picks the single ``""`` variant.
+        """
         from pillar.models.heads.report_lm import SPECIAL_TOKENS
 
-        # Same prompt for every sample.
-        out["prompt_token_ids"] = self._prompt_token_ids.clone()
-        out["prompt_attention_mask"] = self._prompt_attention_mask.clone()
+        variant_key = gender_key if self.use_samf else ""
+        variant = self._prompt_variants.get(variant_key)
+        if variant is None:
+            # Defensive fallback: if for some reason the variant key isn't
+            # registered (e.g. SAMF was disabled at tokenize-time but the
+            # caller is still passing gender), drop back to the first
+            # available variant.
+            variant = next(iter(self._prompt_variants.values()))
+
+        out["prompt_token_ids"] = variant["ids"].clone()
+        out["prompt_attention_mask"] = variant["mask"].clone()
 
         # Report: append the EOR stop token before tokenization.
         eor = SPECIAL_TOKENS["eor"]
