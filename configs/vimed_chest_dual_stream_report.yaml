@@ -31,7 +31,7 @@ main:
   exp_name: dual-stream-pillar-report
   seed: 42
   log_dir: ./logs
-  checkpoints_dir: ./logs/dual-stream-pillar/report
+  checkpoints_dir: /scratch/thahoa/PET/logs/dual-stream-pillar/report
   timestamp_save_dir: False
 
   disable_wandb: False
