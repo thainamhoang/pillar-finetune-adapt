@@ -273,6 +273,7 @@ class ReportLM(nn.Module):
         top_p: float = 0.9,
         temperature: float = 0.7,
         repetition_penalty: float = 1.05,
+        no_repeat_ngram_size: int = 0,
         do_sample: bool = True,
         stop_on_eor: bool = True,
     ) -> torch.Tensor:
@@ -280,6 +281,12 @@ class ReportLM(nn.Module):
 
         Returns only the *newly generated* token ids (not the visual-prompt
         prefix). Caller decodes via ``self.tokenizer.decode(...)``.
+
+        ``no_repeat_ngram_size``: when > 0, HF generate() hard-blocks any
+        n-gram of that size from appearing twice in the generated
+        sequence. Standard fix for the "Physiological X. Physiological X.
+        Physiological X." failure mode (PETRG-3D §D.5, Fig. 8). Set to 4
+        in the engine config; pass 0 to disable.
         """
         eos_ids = []
         if self.tokenizer.eos_token_id is not None:
@@ -300,6 +307,8 @@ class ReportLM(nn.Module):
             pad_token_id=self.tokenizer.pad_token_id,
             eos_token_id=eos_ids if eos_ids else None,
         )
+        if no_repeat_ngram_size and no_repeat_ngram_size > 0:
+            gen_kwargs["no_repeat_ngram_size"] = int(no_repeat_ngram_size)
         out = self.model.generate(**gen_kwargs)
         # When generating from inputs_embeds, HF returns ONLY the newly
         # generated token ids (the input has no token_ids to echo). Some

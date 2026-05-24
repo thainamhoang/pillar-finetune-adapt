@@ -74,10 +74,18 @@ engine:
     log_interval: 25
     limit_num_batches: null
     eval_generate_n_batches: 2      # generate on first 2 val batches per epoch
-    eval_generate_max_new_tokens: 1024
+    # Tightened from paper defaults after observing "Physiological X.
+    # Physiological X." runaway loops at epoch 10 (PETRG-3D §D.5 + Fig. 8
+    # describe the same failure mode on their baselines). Combined with
+    # the EOR-supervision strengthening in DualStreamReportGenerator
+    # ._build_train_inputs (post-EOR labels = EOR rather than -100, so
+    # the model gets ~100x more EOR targets per sample) this kills the
+    # runaway-repetition mode.
+    eval_generate_max_new_tokens: 512
     eval_generate_top_p: 0.9
-    eval_generate_temperature: 0.7
-    eval_generate_repetition_penalty: 1.05
+    eval_generate_temperature: 0.5
+    eval_generate_repetition_penalty: 1.15
+    eval_generate_no_repeat_ngram_size: 4   # hard-block any 4-token repetition
     log_loss_components: False
     use_gpu_augs: False
     train_gpu_augs: []
