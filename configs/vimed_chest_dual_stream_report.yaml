@@ -40,7 +40,11 @@ main:
   wandb_entity: thainamhoang
 
   ckpt_freq: 1
-  monitor: val/bleu_4
+  # val/lm_loss is the early-stopping monitor instead of val/bleu_4
+  # because BLEU on a small val set (276 samples) has high variance --
+  # best.ckpt was bouncing between near-equivalent checkpoints. lm_loss
+  # is monotonic enough to be a reliable minimum-tracker.
+  monitor: val/lm_loss
 
   allow_overwriting_experiment_checkpoints: True
   find_unused_parameters: True
@@ -53,7 +57,12 @@ main:
 
 engine:
   type: ReportGenerator
-  max_epochs: 30
+  # Observed empirically on the eff=32 + eff=64 runs: val/lm_loss bottoms
+  # out around epoch 13-17 and climbs from there. 30 epochs over-fits past
+  # the minimum; cap at 20 so the last few save-cycles cluster near the
+  # actual best. best.ckpt is monitored on val/lm_loss (see main.monitor)
+  # so use it for inference -- the last/latest.ckpt is the over-fit tail.
+  max_epochs: 20
   kwargs:
     resume: null
     # Distributed scale: 4x H100 with bs=4 per GPU * grad_accum=2 ->
@@ -81,7 +90,11 @@ engine:
     # ._build_train_inputs (post-EOR labels = EOR rather than -100, so
     # the model gets ~100x more EOR targets per sample) this kills the
     # runaway-repetition mode.
-    eval_generate_max_new_tokens: 512
+    # 256 caps the runaway harder. Chest reports in the ViMED training
+    # set are 50-250 English tokens (per diagnostic of report_token_ids
+    # length distribution). 256 is generous; if the model needs more, we
+    # have a structural problem worth fixing rather than papering over.
+    eval_generate_max_new_tokens: 256
     eval_generate_top_p: 0.9
     eval_generate_temperature: 0.5
     eval_generate_repetition_penalty: 1.15
@@ -191,11 +204,22 @@ model:
       - k_proj
       - v_proj
       - o_proj
+    # Class-weighted CE on the EOR target. ~1 EOR target per ~100 content
+    # tokens; without weighting, content-prediction loss drowns out the
+    # gradient teaching content->EOR transition. 50 means EOR contributes
+    # ~33% of per-sample weighted loss. PETRG-3D §D.5 names the failure
+    # mode but doesn't describe their fix mechanism; this is ours.
+    eor_loss_weight: 50.0
 
 optimizer:
   type: AdamW
   kwargs:
-    lr: 5.0e-5                       # paper default
+    # 5e-5 (paper default) was on 660 PETRG-Lym samples; we have 2206 chest
+    # samples = 3.3x more data per epoch. The eff=32 + eff=64 runs both
+    # over-fit around epoch 13-17 -- model learns the content distribution
+    # faster than it learns the content->EOR transition. Lower lr buys
+    # more useful updates before over-confidence sets in.
+    lr: 2.0e-5
     weight_decay: 0.01
 
   scheduler:
