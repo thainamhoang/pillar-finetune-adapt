@@ -187,6 +187,11 @@ model:
     resampler_num_heads: 8
     resampler_ffn_mult: 4
     resampler_dropout: 0.0
+    # projection_depth: 2 -> LLaVA-style MLP (default; what we trained on).
+    # projection_depth: 1 -> single nn.Linear, matches the released
+    #                         PETRG-3D code exactly. Use for paper-faithful
+    #                         ablation runs.
+    projection_depth: 2
     projection_dropout: 0.0
     # ---- LLM + LoRA ----
     llm_repo_id: google/medgemma-1.5-4b-it

@@ -201,21 +201,41 @@ class ReportLM(nn.Module):
         old_num = old_emb.num_embeddings
         new_num = old_num + num_added
 
-        # Compute mean BEFORE resizing (so it's over the original rows).
-        mean_vec = old_emb.weight.mean(dim=0, keepdim=True)
+        # Compute mean over BOTH input and (if present) output embeddings
+        # BEFORE resizing, so per-table means reflect the table's own
+        # learned distribution (input and output can drift even when tied
+        # at init via the lm-head projection).
+        in_mean = old_emb.weight.mean(dim=0, keepdim=True)
 
         self.model.resize_token_embeddings(new_num)
         new_emb = self.model.get_input_embeddings()
-        new_emb.weight[old_num:new_num] = mean_vec.to(new_emb.weight.dtype)
+        new_emb.weight[old_num:new_num] = in_mean.to(new_emb.weight.dtype)
 
-        # If the LM has an untied lm_head, do the same on the output side.
+        # Output-side init. If the LM has an UNTIED lm_head, new rows
+        # from resize_token_embeddings come up as HF's default (often
+        # zero or kaiming-init), which means near-zero logits for the
+        # new tokens -- including EOR. That alone can cause "model never
+        # emits EOR" failures on untied-head models (Llama / Qwen
+        # variants), even though Gemma3 escapes because it ties by
+        # default. Detect tying robustly via config flag + identity
+        # check, and ALWAYS mean-init the new rows on the untied path.
         out_emb = self.model.get_output_embeddings()
-        if out_emb is not None and out_emb.weight.shape[0] >= new_num:
-            # Only init if shape changed (i.e. not tied).
-            if not torch.equal(out_emb.weight[:old_num], new_emb.weight[:old_num].to(out_emb.weight.dtype)):
-                pass  # tied, nothing to do
-            else:
-                out_emb.weight[old_num:new_num] = mean_vec.to(out_emb.weight.dtype)
+        if out_emb is None:
+            return
+        tied = bool(getattr(self.model.config, "tie_word_embeddings", False))
+        if not tied:
+            # Identity check as a backstop in case config flag is wrong.
+            tied = out_emb.weight.data_ptr() == new_emb.weight.data_ptr()
+        if tied:
+            # resize_token_embeddings already kept the output rows in sync
+            # with the input rows. Nothing more to do.
+            return
+        if out_emb.weight.shape[0] < new_num:
+            # HF didn't resize the lm_head along with embed (rare; defensive).
+            return
+        out_mean = out_emb.weight[:old_num].mean(dim=0, keepdim=True)
+        with torch.no_grad():
+            out_emb.weight[old_num:new_num] = out_mean.to(out_emb.weight.dtype)
 
     # --- LoRA ---
 

@@ -4,21 +4,40 @@ Compresses a long vision-token sequence (e.g. 16384 tokens from one
 Pillar0-ChestCT encoder) down to a small fixed number of latent queries
 (default 128) that can be spliced into an LLM prompt as visual tokens.
 
-Architecture mirrors PETRG-3D (arXiv:2511.20145, Nov 2025) §4.1:
+Architecturally PETRG-aligned but NOT release-identical — see "Paper
+alignment" note below.
+
+Layout::
 
     queries  ─→  [cross-attn → self-attn → FFN] x N layers  ─→ latents
     (B, Q, D)        ↑ K,V from vision tokens                (B, Q, D)
 
 One instance per modality (CT and PET independently). No positional or
-modality-type embeddings here -- the LLM gets modality identity via
+modality-type embeddings here — the LLM gets modality identity via
 prompt-level ``<ct>`` / ``<pet>`` special tokens, not via embedding
-arithmetic in the resampler. This is the post-perceiver-fusion contract
-the PETRG-3D paper validated.
+arithmetic in the resampler.
+
+Paper alignment
+~~~~~~~~~~~~~~~
+
+Our per-layer block is **separate** cross-attn → self-attn → FFN (a
+standard transformer-decoder layout). The PETRG-3D *released* code uses
+the **Flamingo-style** Perceiver Resampler from Alayrac et al. 2022,
+where each layer concatenates the latents to the vision sequence and
+performs ONE attention pass over ``[vision || latents]`` (with the
+queries being the latents), then FFN — no separate self-attention block.
+
+The paper text (§4.1) just calls it "Perceiver Sampler" without naming
+the layer style, so both are defensible against the prose. Shape and
+intent (compress N→Q with cross-modal information flow into queries)
+are identical; block internals differ. Our form trains and converges
+fine empirically and is marginally easier to LoRA-fy if we ever
+expand the trainable set beyond the LM.
 
 Implementation notes:
 
 - Hand-rolled (no external Q-Former / Perceiver-IO lib) so the dep graph
-  stays light and we can place LoRA-friendly sub-modules later if needed.
+  stays light.
 - Pre-norm transformer style. GELU FFN with ``ffn_mult * dim`` hidden.
 - Cross-attn K/V come from the *flattened* encoder activation: input is
   expected as ``(B, C, H, W, D)`` (the Pillar0 Atlas output shape) OR
