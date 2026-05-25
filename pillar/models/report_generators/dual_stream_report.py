@@ -108,6 +108,15 @@ class DualStreamReportGenerator(AbstractModel):
         lora_target_modules: Optional[list[str]] = None,
         apply_lora: bool = True,
         freeze_lm: bool = True,
+        # Per-token class-weight on the EOR target. With only ~1 EOR
+        # supervised target per sample (vs ~100 content tokens), the
+        # gradient that teaches "after content, emit EOR" is drowned out.
+        # PETRG-3D §D.5 + Fig. 8 names this failure mode but the paper
+        # doesn't describe their fix mechanism. We use class-weighted CE:
+        # the EOR token's per-target CE loss is multiplied by this factor.
+        # 50 means a single EOR target contributes ~33% of a sample's
+        # total report-span loss (50 / (100 + 50)).
+        eor_loss_weight: float = 50.0,
     ) -> None:
         super().__init__(args)
 
@@ -185,6 +194,7 @@ class DualStreamReportGenerator(AbstractModel):
         self.ct_pad_id = self.lm.special_token_ids["ct_pad"]
         self.pet_pad_id = self.lm.special_token_ids["pet_pad"]
         self.eor_id = self.lm.special_token_ids["eor"]
+        self.eor_loss_weight = float(eor_loss_weight)
         self.num_ct_queries = num_ct_queries
         self.num_pet_queries = num_pet_queries
         self.token_dim = token_dim
@@ -334,30 +344,13 @@ class DualStreamReportGenerator(AbstractModel):
         # padding scheme.
         labels[:, Lp:][report_attention_mask == 0] = -100
 
-        # Strengthen the EOR (end-of-report) supervision. As-is, only ONE
-        # EOR target exists per sample (the single EOR token at the end of
-        # report_token_ids). That's <1% of the loss signal, drowning out
-        # the gradient that should teach the model to terminate. PETRG-3D
-        # §D.5 names "explicit end-of-report token" as the single most
-        # impactful fix for runaway generation. To make it stick:
-        #
-        # For each batch row, find the first EOR position and overwrite all
-        # subsequent labels in the report span (currently -100 due to
-        # padding) with the EOR token id. The input_ids stay padded
-        # (attention_mask=0 there, so they don't enter attention), but the
-        # model is now supervised to keep emitting EOR after content -- a
-        # strong attractor for "once you finish, stop."
-        eor_id = self.eor_id
-        report_labels = labels[:, Lp:]  # view into labels (shape: B, Lr)
-        for b in range(B):
-            eor_positions = (report_token_ids[b] == eor_id).nonzero(as_tuple=True)[0]
-            if eor_positions.numel() == 0:
-                # Sample's report didn't fit -- EOR was truncated. Nothing
-                # to anchor on, leave labels alone.
-                continue
-            first_eor = int(eor_positions[0].item())
-            # Supervise EOR at every position from first_eor onward.
-            report_labels[b, first_eor:] = eor_id
+        # NOTE: This used to over-supervise EOR by overwriting post-EOR
+        # labels with EOR token id. Empirically that taught the model to
+        # "predict EOR once already in EOR state" (an absorbing-state
+        # attractor) but did NOT improve the content->EOR transition
+        # itself -- generation still ran to max_new_tokens because the
+        # model never naturally entered the EOR state. Reverted in favor
+        # of class-weighted CE in forward(); see eor_loss_weight kwarg.
 
         return input_embeds, attn_mask, labels
 
@@ -396,15 +389,65 @@ class DualStreamReportGenerator(AbstractModel):
             pet_embeds=pet_emb,
         )
 
+        # Get logits only -- we compute the (weighted) loss ourselves
+        # so the EOR target carries `eor_loss_weight`x more gradient
+        # than content tokens.
         out = self.lm(
             inputs_embeds=input_embeds,
             attention_mask=attention_mask,
-            labels=labels,
+            labels=None,
         )
+        loss = self._compute_weighted_lm_loss(out.logits, labels)
         return {
-            "loss": out.loss,
+            "loss": loss,
             "logits": out.logits,
         }
+
+    def _compute_weighted_lm_loss(
+        self, logits: torch.Tensor, labels: torch.Tensor
+    ) -> torch.Tensor:
+        """Standard causal LM loss with per-target class weighting on EOR.
+
+        Math:
+          shift_logits = logits[..., :-1, :]
+          shift_labels = labels[..., 1:]
+          per_pos_loss = CE(shift_logits, shift_labels, ignore_index=-100, reduction='none')
+          per_pos_weight = where(shift_labels == eor_id, eor_loss_weight, 1.0)
+          loss = sum(per_pos_loss * per_pos_weight) / sum(per_pos_weight on non-ignored)
+
+        Concretely on a 100-content-token report with 1 EOR target and
+        eor_loss_weight=50: EOR loss contributes 50 / (100 + 50) ≈ 33% of
+        the per-sample weighted-average loss. That's a substantial gradient
+        push toward learning the content -> EOR transition without the
+        degenerate "predict EOR everywhere" attractor my earlier patch
+        accidentally created.
+        """
+        import torch.nn.functional as F
+
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+
+        V = shift_logits.size(-1)
+        flat_logits = shift_logits.view(-1, V)
+        flat_labels = shift_labels.view(-1)
+
+        per_pos_loss = F.cross_entropy(
+            flat_logits,
+            flat_labels,
+            ignore_index=-100,
+            reduction="none",
+        )  # (B*T,); zero at ignored positions
+
+        # Per-position weight: eor_loss_weight on EOR targets, 1 elsewhere.
+        # Use the loss tensor's dtype to keep numerics consistent under bf16.
+        per_pos_w = torch.ones_like(per_pos_loss)
+        per_pos_w[flat_labels == self.eor_id] = self.eor_loss_weight
+
+        # Mask out ignored positions from both loss and denominator.
+        valid = (flat_labels != -100).to(per_pos_loss.dtype)
+        weighted_loss = (per_pos_loss * per_pos_w * valid).sum()
+        denom = (per_pos_w * valid).sum().clamp(min=1.0)
+        return weighted_loss / denom
 
     @torch.no_grad()
     def generate(
