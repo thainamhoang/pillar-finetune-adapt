@@ -96,6 +96,7 @@ class DualStreamReportGenerator(AbstractModel):
         resampler_num_heads: int = 8,
         resampler_ffn_mult: int = 4,
         resampler_dropout: float = 0.0,
+        projection_depth: int = 2,
         projection_dropout: float = 0.0,
         token_dim: int = 1152,
         # LLM
@@ -179,14 +180,19 @@ class DualStreamReportGenerator(AbstractModel):
         )
 
         # ---- Per-modality adapters ----
+        # depth=2 is our LLaVA-style default; depth=1 matches the released
+        # PETRG-3D code exactly (single nn.Linear). See VisionProjection
+        # docstring for the trade-off.
         self.ct_adapter = VisionProjection(
             in_dim=token_dim,
             out_dim=self.lm.hidden_size,
+            depth=projection_depth,
             dropout=projection_dropout,
         )
         self.pet_adapter = VisionProjection(
             in_dim=token_dim,
             out_dim=self.lm.hidden_size,
+            depth=projection_depth,
             dropout=projection_dropout,
         )
 
