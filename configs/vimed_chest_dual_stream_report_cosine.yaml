@@ -1,0 +1,221 @@
+# Phase B v2: Dual-stream PET/CT -> English report, cosine + anti-overfit.
+#
+# Diagnosis from the prior runs (see wandb dual-stream-pillar):
+#   * lr=2e-5 (constant) UNDERFITS: train/val loss still declining at
+#     step ~350, but val/bleu_4 and val/rouge_l peaked higher than the
+#     overfit runs.  Model was in the "generally fluent English" phase
+#     before collapsing onto specific (wrong) patterns.
+#   * lr=5e-5 (constant, paper default) OVERFITS: val/lm_loss bottoms
+#     around step 600-800 and CLIMBS thereafter.  NLG metrics plateau
+#     at 0.21 ROUGE-L / 0.03 BLEU-4.
+#   * val/lm_loss minimum and NLG maximum are DECOUPLED: the underfit
+#     blue run had higher val/lm_loss AND higher val/rouge_l, val/bleu_4.
+#     n-gram metrics reward general fluency more than confident-but-wrong
+#     specifics.
+#
+# Strategy:
+#   * Cosine decay 5e-5 -> 5e-6 over 25 epochs.  First 5-8 epochs run at
+#     near-paper lr (fast early convergence like the gray/pink runs), last
+#     17-20 epochs anneal toward 1/10 of that (slow refinement avoiding
+#     the late-stage overfit).
+#   * Stronger regularization: weight_decay 0.01 -> 0.05, dropout 0.0 ->
+#     0.1 in resampler + projection.  Targets the memorization the prior
+#     overfit runs exhibited.
+#   * Monitor val/rouge_l instead of val/lm_loss for best.ckpt.  ROUGE-L
+#     averaged over the eval pass is less noisy than BLEU-4 on a 276-sample
+#     val set, and unlike val/lm_loss it actually corresponds to text
+#     quality.
+#
+# ARCHITECTURE UNCHANGED from configs/vimed_chest_dual_stream_report.yaml:
+# same Pillar0 encoders + per-modality perceivers (128 queries) + adapters
+# + MedGemma 1.5 4B-IT + LoRA r=8 alpha=32 + SAMF + EOR class-weighting.
+
+experiment:
+  name: dual-stream-pillar-report-cosine
+  tags: ["pillar0", "chest", "petct", "report-generation", "medgemma", "cosine-v2"]
+  notes: >
+    Phase B v2: cosine 5e-5 -> 5e-6, stronger regularization (wd=0.05,
+    dropout=0.1 on resampler/projection), monitor on val/rouge_l.  Built
+    after the constant-lr runs (2e-5 underfit, 5e-5 overfit) revealed the
+    val_loss / NLG decoupling.
+
+main:
+  exp_name: dual-stream-pillar-report-cosine
+  seed: 42
+  log_dir: ./logs
+  checkpoints_dir: ./logs/dual-stream-pillar/report-cosine
+  timestamp_save_dir: False
+
+  disable_wandb: False
+  wandb_offline: False
+  wandb_project: dual-stream-pillar
+  wandb_entity: thainamhoang
+
+  ckpt_freq: 1
+  # val/rouge_l (NOT val/lm_loss).  Empirically val/lm_loss bottoms 5-8
+  # epochs BEFORE val/rouge_l peaks -- the early minimum picks an underfit
+  # model that hasn't yet learned report-specific n-grams.  ROUGE-L tracks
+  # what we actually care about (text overlap with reference) and is more
+  # stable than BLEU-4 on a 276-sample val.
+  monitor: val/rouge_l
+
+  allow_overwriting_experiment_checkpoints: True
+  find_unused_parameters: True
+  force_loading_train_dataloader: False
+
+  phases:
+    train: True
+    dev: True
+    test: False
+
+engine:
+  type: ReportGenerator
+  # 25 epochs gives cosine room to decay meaningfully (peak lr at epoch
+  # ~3, midpoint at epoch ~12, near-min at epoch 25).  Constant-lr runs
+  # overfit around epoch 13-17; cosine should suppress the late-stage
+  # divergence by then -- effective_lr at epoch 17 will be ~1.5e-5.
+  max_epochs: 25
+  kwargs:
+    resume: null
+    # eff_batch = 1 GPU * bs=4 * accum=8 = 32.  Same target as the prior
+    # eff=32 runs (2206 / 32 = 69 steps/epoch * 25 epochs = 1725 total
+    # updates -- 1.4x the paper's 1240 on PETRG-Lym, healthy for our
+    # larger dataset without saturating Adam's update budget).
+    # Single-H200 sizing:
+    #   batch_size=4 -> ~45 GB activations + ~12 GB static + ~10 GB
+    #   eval KV cache = ~67 GB peak.  Fits comfortably in 141 GB.
+    # For 4xH100/H200 DDP: use accumulate_grad_batches: 2 instead.
+    accumulate_grad_batches: 8
+    precision: bf16-mixed
+    log_interval: 25
+    limit_num_batches: null
+    eval_generate_n_batches: 2
+    eval_generate_max_new_tokens: 256
+    eval_generate_top_p: 0.9
+    eval_generate_temperature: 0.5
+    eval_generate_repetition_penalty: 1.15
+    eval_generate_no_repeat_ngram_size: 4
+    log_loss_components: False
+    use_gpu_augs: False
+    train_gpu_augs: []
+    test_gpu_augs: []
+
+dataloader:
+  # Single-H200 sizing.  For 4-GPU DDP, drop num_workers to 4-6 to stay
+  # under (cpus_per_task / num_gpus) and set accumulate_grad_batches: 2
+  # in the engine block to keep eff_batch=32.
+  batch_size: 4
+  eval_batch_size: 2
+  num_workers: 12                    # 12 workers on a single rank with 32 cpus_per_task
+  class_bal: False
+  train_drop_last: True
+  val_drop_last: False
+  multi_gpu_eval: False
+  persistent_workers: True
+  prefetch_factor: 2
+  pin_memory: True
+  clip_grad: 1.0
+  no_shuffle_training_set: False
+  use_null_collate: False
+  frac_train_samples: 1.0
+  no_cache_misses_allowed: False
+
+dataset:
+  type: ViMedChestReportDataset
+
+  shared_dataset_kwargs:
+    csv_path: /scratch/thahoa/PET/ViMed_prep_v2/manifest_splits.csv
+    region: chest
+    llm_repo_id: google/medgemma-1.5-4b-it
+    num_ct_queries: 128
+    num_pet_queries: 128
+    max_report_tokens: 512
+    require_report: True
+    use_samf: True
+
+model:
+  type: DualStreamReportGenerator
+  kwargs:
+    # ---- Encoders (frozen) ----
+    encoder_ckpt: ./logs/dual-stream-pillar/fusion/dual_stream_encoder.pt
+    ct_channels: 11
+    pet_channels: 4
+    anatomy: chest_ct
+    model_repo_id: YalaLab/Pillar0-ChestCT
+    model_revision: main
+    freeze_encoders: True
+    token_dim: 1152
+    # ---- Resamplers + projections ----
+    num_ct_queries: 128
+    num_pet_queries: 128
+    resampler_depth: 6
+    resampler_num_heads: 8
+    resampler_ffn_mult: 4
+    # 0.0 -> 0.1.  The prior overfit runs had train/val gap that opened
+    # rapidly after step 500.  Dropout in the perceiver + projection
+    # forces the model to spread information across more attention heads
+    # / projection dims rather than memorizing a few attention paths.
+    resampler_dropout: 0.1
+    projection_depth: 2
+    projection_dropout: 0.1
+    # ---- LLM + LoRA ----
+    llm_repo_id: google/medgemma-1.5-4b-it
+    llm_torch_dtype: bfloat16
+    apply_lora: True
+    freeze_lm: True
+    lora_r: 8
+    lora_alpha: 32
+    lora_dropout: 0.1
+    lora_target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+    # EOR class-weighted CE.  Unchanged from v1; the EOR-emission problem
+    # was orthogonal to the under/overfit problem this config targets.
+    eor_loss_weight: 50.0
+
+optimizer:
+  type: AdamW
+  kwargs:
+    # Peak lr = paper's 5e-5.  The constant runs at this lr overfit, but
+    # the cosine schedule below decays to 5e-6 by epoch 25, so the
+    # late-stage effective lr is much smaller.  Adam runs hot at the
+    # start (fast progress like gray/pink) then refines slow (avoiding
+    # the late-stage divergence that killed those runs).
+    lr: 5.0e-5
+    # 0.01 -> 0.05.  More aggressive decay on the trainable params
+    # (resampler + projection + LoRA).  At the cosine peak this couples
+    # with the higher lr to bound update magnitudes; near the cosine
+    # tail it dominates and pushes parameters toward smaller norms,
+    # acting as soft early-stopping.
+    weight_decay: 0.05
+
+  scheduler:
+    interval: epoch
+    frequency: 1
+    # Cosine annealing with 1-epoch warmup.  Profile across 25 epochs:
+    #   epoch 0:        lr ramps 0 -> 5e-5  (warmup, ~69 steps)
+    #   epoch 1-5:      lr ~ 5.0e-5 to 4.5e-5  (paper-like, fast learning)
+    #   epoch 6-12:     lr ~ 4.5e-5 to 2.7e-5  (sweet spot per our 2e-5 run)
+    #   epoch 13-19:    lr ~ 2.7e-5 to 1.0e-5  (refinement, no overshoot)
+    #   epoch 20-25:    lr ~ 1.0e-5 to 5e-6   (anneal)
+    # Pillar's CosineAnnealingWarmup interprets warmup_epochs / max_epochs
+    # in (fractional) epoch units and ramps from 0 -> base_lr in warmup,
+    # then half-cosine from base_lr -> min_lr over max_epochs - warmup_epochs.
+    type: CosineAnnealingWarmup
+    kwargs:
+      warmup_epochs: 1
+      max_epochs: 25
+      min_lr: 5.0e-6                # 1/10 of peak; standard cosine end-point
+
+# layer_decay omitted -- encoders + LLM are frozen, only the 280M
+# trainable params (resamplers + adapters + LoRA) update.  A single
+# param group with the cosine schedule is what we want here.
+
+metrics:
+  epoch_metrics:
+    train: []
+    val: []
+    test: []
+  losses: null
