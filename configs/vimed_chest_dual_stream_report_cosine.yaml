@@ -43,7 +43,7 @@ main:
   exp_name: dual-stream-pillar-report-cosine
   seed: 42
   log_dir: ./logs
-  checkpoints_dir: ./logs/dual-stream-pillar/report-cosine
+  checkpoints_dir: /scratch/thahoa/PET/logs/dual-stream-pillar/report-cosine
   timestamp_save_dir: False
 
   disable_wandb: False
