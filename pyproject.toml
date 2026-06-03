@@ -49,6 +49,11 @@ dependencies = [
     "pydicom==2.3.1",
     "torchio==0.18.90",
     "medmnist==2.2.1",
+    # PETWB-REP preprocessing: anatomical landmark extraction via
+    # nnU-Net-backed organ segmentation. Used by
+    # scripts/segment_landmarks_petwbrep.py to find lung apex/base and
+    # pelvis floor for physical-mm region boundaries.
+    "totalsegmentator>=2.4.0",
     # Computer Vision
     "opencv-python-headless==4.7.0.72",
     "albumentations==1.3.0",

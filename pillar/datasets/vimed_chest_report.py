@@ -182,7 +182,12 @@ class ViMedChestReportDataset(Dataset):
         # older keyword some scripts still use.
         split_group: Optional[str] = None,
         split: Optional[str] = None,
-        region: str = "chest",
+        # ``region`` accepts:
+        #   * ``str``  -- single region (legacy chest-only behaviour)
+        #   * ``list[str]`` -- subset of {head_neck, chest, abdomen_pelvis};
+        #     used when loading multi-region manifests (e.g. PETWB-REP).
+        #   * ``None`` -- no region filter; loads whatever the manifest contains.
+        region: Optional[str | list[str]] = "chest",
         include_raw: bool = False,
         # ---- Phase B tokenization (optional) ----
         tokenizer: Optional[Any] = None,
@@ -214,7 +219,15 @@ class ViMedChestReportDataset(Dataset):
         self.rows = list(csv.DictReader(self.manifest_path.open()))
         if resolved_split is not None:
             self.rows = [r for r in self.rows if r.get("split") == resolved_split]
-        self.rows = [r for r in self.rows if r.get("region") == region]
+        # Region filter: accept str / list[str] / None. Keeping ``self.region``
+        # as the resolved set helps downstream callers (and the prompt-variant
+        # selector) discover which regions are loaded.
+        if region is None:
+            self.region: Optional[set[str]] = None
+        else:
+            allowed = {region} if isinstance(region, str) else set(region)
+            self.rows = [r for r in self.rows if r.get("region") in allowed]
+            self.region = allowed
         self.include_raw = include_raw
         # ``info`` matches the convention used by other ViMED datasets so
         # train.py's `dataset_info` plumbing still works.
@@ -244,6 +257,32 @@ class ViMedChestReportDataset(Dataset):
         self.require_report = require_report
 
         if tokenizer is not None:
+            # SAMF healthy templates are chest-only at the moment (see
+            # CHEST_HEALTHY_TEMPLATES). If we silently applied the chest
+            # template to head-neck or abdomen-pelvis rows, we'd train the
+            # LM to expect "no pleural effusion", "lung fields clear", etc.
+            # to be relevant for brain or liver findings -- silent
+            # mis-supervision. Hard-fail so the H&N/abd templates get
+            # authored explicitly before any multi-region SAMF run.
+            loaded_non_chest = (
+                self.region is not None
+                and any(r != "chest" for r in self.region)
+            )
+            if (
+                self.use_samf
+                and prompt_template is None
+                and loaded_non_chest
+            ):
+                raise NotImplementedError(
+                    f"SAMF is enabled but the dataset loaded non-chest regions "
+                    f"({sorted(self.region)}). Head-neck and abdomen-pelvis "
+                    f"healthy templates are not authored yet (deferred to a "
+                    f"sibling plan). Either: (a) set use_samf=False, "
+                    f"(b) filter to region='chest' only, or "
+                    f"(c) pass an explicit prompt_template that handles all "
+                    f"loaded regions."
+                )
+
             if prompt_template is not None:
                 template = prompt_template  # user override; takes precedence
             elif self.use_samf:
