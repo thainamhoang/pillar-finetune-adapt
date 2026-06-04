@@ -156,7 +156,13 @@ def find_session_files(patient_dir: Path) -> tuple[Path | None, Path | None]:
     # Derivatives mirror the rawdata patient ID. patient_dir lives under
     # rawdata/; locate the parallel directory under derivatives/.
     derivatives_root = patient_dir.parent.parent / "derivatives" / patient_dir.name
-    suv_pet = sorted(derivatives_root.rglob("*desc-suv_pet.nii.gz"))
+    # The PETWB-REP release uses ``*_desc-pet_suv.nii.gz`` (BIDS-style:
+    # suffix=pet, desc=suv). The paper's Fig. 4 documented it as
+    # ``*_desc-suv_pet.nii.gz`` (the two halves swapped). Match either
+    # so we're robust to both observed conventions.
+    suv_pet = sorted(derivatives_root.rglob("*desc-pet_suv*.nii.gz"))
+    if not suv_pet:
+        suv_pet = sorted(derivatives_root.rglob("*desc-suv_pet*.nii.gz"))
     suv_pet_path = suv_pet[0] if suv_pet else None
     return raw_ct_path, suv_pet_path
 
