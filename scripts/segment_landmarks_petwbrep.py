@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tqdm.auto import tqdm
 
 # Import nibabel-based helpers from pillar.utils.nifti for canonical RAS +
 # world-z extraction. The masks TotalSegmentator emits are aligned to the
@@ -292,8 +293,21 @@ def main() -> None:
 
     n_ok = n_skipped = n_fail = 0
     failures_log = out_dir / f"failures_shard{args.shard_index:04d}.log"
+    # tqdm: one tick per patient. Per-patient TotalSegmentator takes ~10-30s
+    # on GPU so progress is human-meaningful; the postfix surfaces the
+    # running ok/skip/fail tallies so failures don't get lost between bars.
+    # ``tqdm.write`` is used for failure log lines instead of ``print`` /
+    # ``logger.warning`` so the progress bar stays intact at the bottom of
+    # the terminal.
+    pbar = tqdm(
+        shard,
+        total=len(shard),
+        desc=f"shard {args.shard_index}",
+        unit="patient",
+        dynamic_ncols=True,
+    )
     with failures_log.open("w") as flog:
-        for i, patient_dir in enumerate(shard, start=1):
+        for patient_dir in pbar:
             ok, msg = process_patient(
                 patient_dir, out_dir,
                 device=args.device, fast=args.fast,
@@ -308,12 +322,9 @@ def main() -> None:
                 n_fail += 1
                 flog.write(f"{patient_dir.name}\t{msg}\n")
                 flog.flush()
-                logger.warning("FAILED %s: %s", patient_dir.name, msg.splitlines()[0])
-            if i % 10 == 0:
-                logger.info(
-                    "[%d/%d] ok=%d skip=%d fail=%d",
-                    i, len(shard), n_ok, n_skipped, n_fail,
-                )
+                tqdm.write(f"FAILED {patient_dir.name}: {msg.splitlines()[0]}")
+            pbar.set_postfix(ok=n_ok, skip=n_skipped, fail=n_fail)
+    pbar.close()
 
     logger.info(
         "DONE shard %d: ok=%d skip=%d fail=%d (failures in %s)",
